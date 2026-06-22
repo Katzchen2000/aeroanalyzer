@@ -1,0 +1,47 @@
+# AeroAnalyzer Pro - Claude AI System Instructions
+
+`<project_context>`
+You are operating within the codebase of **AeroAnalyzer Pro**, a C++ multi-objective optimizer for a 3D-printed flying wing. It uses NSGA-II to evaluate designs against drag, mass, and static-margin deviation, subject to strict aerodynamic and structural constraints.
+
+The project is highly modular, relies on precise numerical methods, and requires deep domain knowledge in computational fluid dynamics (CFD), rigid body mechanics, and genetic algorithms.
+`</project_context>`
+
+`<current_milestone>`
+**CRITICAL:** The project is currently transitioning to **Milestone 3 (Morino Dirichlet Panel Solver)**. 
+The aerodynamic engine in `aero_potential::solve()` is currently a finite-wing reference model. Your primary architectural goal when touching aerodynamics is to replace this reference model with a dense AIC matrix solver (Morino Dirichlet formulation) using Direct LU factorization, WITHOUT changing the `solve()` function signature. The new solver MUST pass the existing analytic gates in `tests/test_aero.cpp`.
+`</current_milestone>`
+
+`<strict_coding_rules>`
+You must strictly adhere to the following C++ and build rules. Do not rationalize exceptions.
+
+1. **Compiler Flags:** NEVER suggest or use `-ffast-math` or `/fp:fast`. The trim loops and Newton-Raphson solvers rely on IEEE strictness (`/fp:precise`) to detect NaN/Inf states.
+2. **Linear Algebra:** Use direct LU decomposition (`PartialPivLU` via Eigen or the internal `linalg.h`) for the dense AIC matrix. Do NOT use iterative solvers (like BiCGSTAB) for the panel method, as the matrix is not diagonally dominant.
+3. **Build Scripts:** `build.ps1` MUST remain pure ASCII. Do not use UTF-8 em-dashes, curly quotes, or non-ASCII characters, as PowerShell 5.1 will misinterpret them and silently fail.
+4. **Dependencies:** The runtime binary has ZERO external dependencies. Eigen is an optional include for linear algebra. Do not introduce new libraries, Boost, or Python wrappers for the main execution loop. OpenMP is used exclusively for the GA candidate evaluation loop.
+5. **Determinism:** The NSGA-II evaluation must remain deterministic. Do not introduce unseeded randomness.
+`</strict_coding_rules>`
+
+`<aerospace_physics_guidelines>`
+When writing or modifying calculations, adhere to these domain realities:
+- **CST Parameterization:** Flying wing pitch trim requires reflex. Upper and lower CST weights (Bernstein polynomials) must remain decoupled so the optimizer can generate reflexed trailing edges (`cm_ac > 0`).
+- **Trim:** Pitch trim is solved simultaneously using a 2D Newton-Raphson solver for $C_L = W/qS$ and $C_m = 0$. 
+- **Coordinate Systems:** Sweep is sheared ($x_{le} = y \cdot \tan\Lambda$), not rotated, to preserve streamwise airfoil sections. Twist (washout) is applied strictly about the local Y-axis.
+- **Constraints over Penalties:** Unflyable designs (e.g., tip stall, OML spar breaches, servo torque > 1.2 kg-cm) use Deb's constraint-domination logic in NSGA-II, not scalar penalty weights.
+`</aerospace_physics_guidelines>`
+
+`<token_efficiency_and_file_handling>`
+To conserve the context window and operate efficiently, you must follow these output and file-editing protocols:
+
+- **Read Before Writing:** Before modifying ANY core file (especially `aero_potential.cpp`, `geom.cpp`, or `evaluate.cpp`), you MUST read `tests/test_aero.cpp` or the relevant test harness to ensure your changes will not break the validation gates.
+- **Diffs over Full Files:** When modifying files over 100 lines, NEVER output the entire file in your response. Output only the specific function, struct, or code block being changed with a few lines of context before and after. 
+- **Modular Edits:** Respect the architecture. The genetic algorithm (`ga.cpp`) only touches the `Candidate` genome. Physics and geometry are hidden behind `Evaluator::run()`. Do not bleed aerodynamic logic into the GA loop.
+- **No Boilerplate:** Do not output boilerplate C++ includes or empty classes unless generating a completely new file.
+- **Use the CLI:** When asked to verify your work, suggest the appropriate powershell command (e.g., `powershell -ExecutionPolicy Bypass -File build.ps1 -Test`) rather than assuming correctness.
+`</token_efficiency_and_file_handling>`
+
+`<communication_style>`
+- Be concise, technical, and direct. 
+- Do not use conversational filler ("I'd be happy to help with that!").
+- When proposing a mathematical or architectural change, state the formula or logic briefly before writing the code.
+- If a user request violates the `<strict_coding_rules>` (e.g., they ask to use `-ffast-math` for speed), politely decline, state the rule, and explain the physical/numerical consequence (e.g., "This will disable NaN watchdogs required by the Newton trim solver").
+`</communication_style>`
