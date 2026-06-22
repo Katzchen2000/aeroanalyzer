@@ -1,0 +1,26 @@
+# build outputs
+build/
+out/
+*.obj
+*.o
+*.a
+*.lib
+*.exe
+*.dll
+*.mod
+
+# run artifacts
+data/surrogates/polar_coeffs.csv
+
+# editor / OS junk
+.DS_Store
+*~
+*.f~
+
+# vendored third-party (large; download separately)
+tools/bin/Xfoil699src/
+tools/bin/*.exe
+
+# scratch experiments (keep .cpp/.h, ignore binaries)
+scratch/*.exe
+scratch/*.obj

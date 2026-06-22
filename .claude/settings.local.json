@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd \"C:\\\\Users\\\\kadan\\\\Downloads\\\\aeroanalyzer\"; powershell -ExecutionPolicy Bypass -File build_mingw.ps1 -Test 2>&1 | Select-Object -Last 50)"
+    ]
+  }
+}
