@@ -273,6 +273,97 @@ TEST(panel_chordwise_convergence) {
     CHECK((hi - lo) / lo < 0.08);               // converged: <8% spread across nc (was >300%)
 }
 
+// ---- Panel-mode counterparts of the core M3 analytic gates ----------------
+// The gates higher up (induced_drag_consistency, lift_increases_with_alpha,
+// trim_converges, panel_lift_slope_matches_prandtl) all run the DEFAULT solver
+// (vlm). These pin the SAME physics on the Morino panel (aero_model = panel) --
+// the prerequisite for promoting the panel to solver of record. They reuse
+// panel_slope_at / rect_wing / demo_wing from above.
+
+// Panel lift slope must track Prandtl 2*pi*AR/(AR+2) and rise with AR (the same
+// acceptance the VLM gate enforces, now on the panel path).
+TEST(panel_lift_slope_matches_prandtl_panel) {
+    Config cfg;
+    viscous::Surrogate surr; surr.load("", cfg);
+    double prev = 0.0;
+    for (double AR : {4.0, 6.0, 8.0, 10.0}) {
+        WingGeometry w = rect_wing(0.20, AR, 40);
+        MassProps mp = massprops::compute(w, cfg);
+        double slope = panel_slope_at(w, mp, surr, cfg);   // sets aero_model=panel
+        double prandtl = 2.0 * PI * mp.AR / (mp.AR + 2.0);
+        CHECK(slope > 0.80 * prandtl && slope < prandtl);   // a few % under Prandtl
+        CHECK(slope < 2.0 * PI);                            // bounded by the 2D value
+        CHECK(slope > prev);                               // MUST rise with AR
+        prev = slope;
+    }
+}
+
+// Unswept rectangular wing -> near-elliptic loading -> span efficiency near 1.
+// Guards the span_efficiency() fix (the old 0.30 physical floor is gone; this
+// pins the upper, clean-loading end where e must approach unity).
+TEST(panel_elliptic_e_near_one) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "10"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = rect_wing(0.20, 6.0, 30);
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    CHECK(st.e > 0.90 && st.e <= 1.0);
+}
+
+// Panel induced drag is internally consistent: CDi == CL^2/(pi e AR), with e the
+// computed span efficiency (mirrors induced_drag_consistency on the panel path).
+TEST(panel_induced_drag_consistency) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "10"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    double cdi = st.CL * st.CL / (PI * st.e * mp.AR);
+    CHECK_NEAR(st.CDi, cdi, 1e-9);
+    CHECK(st.CL > 0.0);
+    CHECK(st.CDp > 0.0);
+}
+
+// Trim drives CL to the weight requirement and Cm to zero under the panel solver
+// (the finite-difference Newton must converge through panel::solve as well).
+TEST(panel_trim_converges) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "10"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = stability::trim(w, mp, surr, cfg);
+    double q = 0.5 * RHO * V_CRUISE * V_CRUISE;
+    double CL_req = mp.mass * GRAV / (q * mp.S_ref);
+    CHECK(st.trimmed);
+    CHECK_NEAR(st.CL, CL_req, 1e-4);
+    CHECK_NEAR(st.CM, 0.0, 1e-4);
+}
+
+// Panel neutral point: unswept rectangle -> quarter chord; sweep carries it aft.
+// Pins the quarter-chord proxy (the production x_np feeding the SM objective). A
+// chordwise load-centre integration alternative was measured and rejected (see
+// neutral_point_load / scratch/xnp_probe.cpp); the proxy stays within ~1-2% MAC
+// of AVL while the alternative drifted ~25% MAC aft on reflexed sections.
+TEST(panel_neutral_point_at_quarter_chord) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "10"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    WingGeometry w = rect_wing(0.20, 6.0, 40);
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    CHECK_NEAR(st.x_np, 0.25 * 0.20, 5e-3);    // unswept rectangle -> 0.25c
+    CHECK(st.x_np < 0.10);                      // nowhere near the 0.75c locus
+
+    WingGeometry ws = demo_wing();             // 18 deg LE sweep
+    MassProps mps = massprops::compute(ws, cfg);
+    AeroState sts = potential::solve(ws, mps, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    CHECK(sts.x_np > 0.25 * ws.root_chord);    // sweep carries x_np aft of root c/4
+}
+
 // Surrogate hull clamp flags out-of-range queries instead of extrapolating.
 TEST(surrogate_clamps) {
     Config cfg;

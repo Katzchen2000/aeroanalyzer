@@ -66,6 +66,11 @@ struct LoadingDump { std::vector<double> y, gamma; };
 LoadingDump panel_loading_debug(const WingGeometry& w, const Config& cfg,
                                 double alpha);
 
+// Neutral-point diagnostics: the legacy quarter-chord proxy vs the chordwise
+// load-centre integration (see neutral_point_load) at a given alpha.
+struct XnpDebug { double proxy = 0, load = 0, cl = 0, mac = 0; };
+XnpDebug panel_xnp_debug(const WingGeometry& w, const Config& cfg, double alpha);
+
 // Full operating-point solve (same outputs as the VLM path).
 AeroState solve(const WingGeometry& w, const MassProps& mp,
                 const viscous::Surrogate& surr, const Config& cfg,

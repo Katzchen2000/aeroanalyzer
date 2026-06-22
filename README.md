@@ -42,15 +42,16 @@ Deb's **constraint-domination**.
 | NSGA-II (fronts, crowding, SBX/PM, constraint-domination) | ✅ implemented + tested |
 | Airfoil seeds (.dat + NACA) + ancestry injection | ✅ implemented + tested |
 | Viscous surrogate (XFOIL-calibrated, shape-parameterized) | ✅ runtime + offline tool |
-| **3D aerodynamics** | ⚠️ **analytic REFERENCE MODEL** — see below |
+| **3D aerodynamics** | ✅ **Morino panel solver (default)** — AVL-validated; VLM is the fallback |
 
-The aerodynamics in `aero_potential::solve()` is currently a finite-wing **reference
-model** (Prandtl lift slope + strip viscous coupling). It is physically reasonable and
-makes the whole optimizer run, but the **Morino Dirichlet panel solver (Milestone 3)**
-is the next step and must replace the body of `solve()` *behind the same signature*.
-Its analytic acceptance gates already live in `tests/test_aero.cpp` (lift slope
-`2π·AR/(AR+2)`, elliptic induced drag, trim convergence) — the panel solver is not to
-be trusted until it reproduces them, cross-checked against **AVL**.
+3D aerodynamics defaults to the **Morino Dirichlet panel solver** (`aero_model = panel`,
+`src/aero_panel.cpp`): a constant-strength doublet/source method with strip viscous
+coupling. It passes every analytic gate in `tests/test_aero.cpp` (lift slope
+`2π·AR/(AR+2)`, elliptic induced drag, trim convergence, quarter-chord neutral point) and
+is cross-checked against **AVL** on the `knee` / `min_drag` / `min_mass` decks — CLα within
+~0.1–2.5 %, neutral point within a few % MAC. The earlier finite-wing analytic model
+(Prandtl lift slope + strip coupling) remains available as the documented fallback via
+`aero_model = vlm` in `aero_potential::solve()`, behind the same signature.
 
 ---
 
@@ -226,10 +227,11 @@ Cross-sectional lofting (**not** B-Rep — no boolean kernel, no voxels):
   (`spar_straight = 1`) breaches the OML on swept wings and is what made every early
   candidate infeasible.
 
-### Phase 3 — Aerodynamics (`aero_potential.cpp`) — *reference model*
+### Phase 3 — Aerodynamics (`aero_potential.cpp`) — *VLM fallback*
 
-> Replaced by the Morino panel solver in Milestone 3, behind the same `solve(w, mp, surr,
-> cfg, alpha, delta_e)` signature.
+> The default model is now the Morino panel solver (`src/aero_panel.cpp`, `aero_model =
+> panel`); the analytic model below is the `aero_model = vlm` fallback, dispatched from the
+> same `solve(w, mp, surr, cfg, alpha, delta_e)` signature.
 
 - 3D lift slope `a = a0 / (1 + a0/(π·e·AR))` (Prandtl), `a0 = 2π`, span efficiency `e`
   from a taper-based Oswald estimate.
@@ -429,7 +431,8 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 
 **AVL cross-check:** put `avl.exe` in `tools\bin\` (see `tools/bin/README.txt`), open
 `out\knee.avl` in it, run `OPER` → `x`, and compare `CLa`, span efficiency, and `Cm`
-against the reference model. This is the standing oracle for the Milestone-3 panel solver.
+against the panel solver. This is the standing oracle for the Milestone-3 panel solver
+(`scratch/knee_xcheck.cpp` reconstructs all three decks and prints the panel/VLM rows).
 
 **Reproducibility / OpenMP determinism** are both verified (same seed ⇒ identical
 `pareto.csv`, serial and parallel).
@@ -440,7 +443,8 @@ against the reference model. This is the standing oracle for the Milestone-3 pan
 
 These are deliberate placeholders behind clean interfaces, slated for replacement:
 
-- **3D aero is the reference model**, not the panel method (Milestone 3).
+- **3D aero is the Morino panel method** (default); the analytic VLM reference model is the
+  `aero_model = vlm` fallback.
 - **High-α NP migration** is a sweep/α heuristic, not a real high-α solve.
 - **Control derivatives** (elevon/elevator effectiveness, hinge moment) use simple flap
   theory — adequate for ranking, not absolute servo sizing.
@@ -455,16 +459,20 @@ These are deliberate placeholders behind clean interfaces, slated for replacemen
 
 ## Roadmap
 
-### Milestone 3 — Morino Dirichlet panel solver *(next)*
-Replace `aero_potential::solve()` with a real 3D constant-strength doublet/source panel
-method.
-- Build the dense AIC matrix; solve with **direct LU** (`linalg`/Eigen `PartialPivLU`),
-  factoring once per geometry and reusing the factorization across the trim Newton's RHS.
-- Trailing-edge wake via doublet-strength difference; wake aligned with freestream for ~3
-  chords then frozen.
-- Keep the strip viscous coupling and the `solve()` signature unchanged.
-- **Acceptance:** pass the existing `tests/test_aero.cpp` analytic gates (lift slope,
-  elliptic `e≈1`, trim) **and** match an AVL run within a few percent before it is trusted.
+### Milestone 3 — Morino Dirichlet panel solver *(done — default model)*
+`aero_model = panel` (`src/aero_panel.cpp`) is the default 3D constant-strength
+doublet/source panel method, dispatched from `aero_potential::solve()` behind the
+unchanged signature.
+- Dense AIC built per geometry and **direct-LU** factored once (Eigen), reusing the
+  factorization across the trim Newton's RHS. The wake is **frozen across the Newton solve**
+  (`panel_trim_freeze_wake`, default on): the wake inclination is irrelevant to attached
+  loading (verified: dCL ~1e-11), so rebuilding it per alpha step was pure cost — freezing
+  it gives ~13× faster trims (one AIC build per candidate).
+- Trailing-edge wake via doublet-strength difference, freestream-aligned then frozen.
+- Strip viscous coupling and the `solve()` signature unchanged.
+- **Validated:** passes every `tests/test_aero.cpp` analytic gate (panel-mode lift slope,
+  elliptic `e≈1`, trim, quarter-chord NP) **and** matches AVL within a few percent on the
+  knee/min_drag/min_mass decks. The VLM remains the documented fallback (`aero_model = vlm`).
 
 ### Milestone 4 — Real viscous tables
 Run `build_surrogate.exe` with `surrogate_mode = xfoil` over the seed + DoE shapes; widen
@@ -512,5 +520,6 @@ Quick index of the core relations (see the cited source for context):
 
 ---
 
-*AeroAnalyzer Pro — reference model stage. Contributions/edits welcome; keep the
-`tests/test_aero.cpp` gates green and `build.ps1` ASCII-only.*
+*AeroAnalyzer Pro — Milestone 3 (Morino panel solver is the default model of record).
+Contributions/edits welcome; keep the `tests/test_aero.cpp` gates green and `build.ps1`
+ASCII-only.*

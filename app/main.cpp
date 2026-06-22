@@ -39,9 +39,14 @@ int main(int argc, char** argv) {
         std::cerr << "[warn] could not open " << cfg_path
                   << " — using built-in defaults\n";
 
+    std::string aero_model = cfg.gets("aero_model", "panel");
     std::cout << "AeroAnalyzer Pro — NSGA-II (drag / mass / static-margin)\n";
-    std::cout << "NOTE: aerodynamics = analytic REFERENCE MODEL (Milestone 3 "
-                 "swaps in the Morino panel solver).\n\n";
+    if (aero_model == "vlm")
+        std::cout << "aerodynamics: analytic vortex-lattice FALLBACK "
+                     "(aero_model = vlm).\n\n";
+    else
+        std::cout << "aerodynamics: Morino panel solver (default, AVL-validated; "
+                     "set aero_model = vlm for the analytic fallback).\n\n";
 
     Evaluator eval(cfg);
 

@@ -465,13 +465,69 @@ double trefftz_CL(const Eigen::VectorXd& mu, double& gamma_max,
     return 2.0 * sumGdy / t_sys.S_ref;
 }
 
+// DIAGNOSTIC (not the production x_np): neutral point from the chordwise
+// doublet distribution. D(x) = mu_upper(x) - mu_lower(x) along a strip is the
+// circulation accumulated from the LE (D(LE)=0, D(TE)=Gamma_strip), so the
+// strip's chordwise centre of pressure follows from integration by parts
+// (dL ~ dD acts at x):  x_cp = INT x dD / INT dD = x_te - (INT D dx)/D_te.
+//
+// This was evaluated as a replacement for the quarter-chord proxy that solve()
+// uses, on the theory that the proxy ignored camber/reflex. It proved WORSE and
+// is retained only for the xnp diagnostic: on a flat plate it sits ~1.5-3% MAC
+// forward of the exact 0.25c (slow chordwise convergence of the constant-
+// strength doublet), and on a reflexed flying-wing section it lands ~25% MAC AFT
+// of AVL -- a reflexed airfoil's D(x) is non-monotonic (the tail unloads), so
+// the small net circulation divided into large fore/aft local loading makes the
+// CoP integral ill-conditioned. The quarter-chord proxy (the thin-airfoil
+// aerodynamic centre) is instead within ~1.5-2% MAC of AVL on the same wing, so
+// solve() keeps it. See scratch/xnp_probe.cpp for the side-by-side.
+double neutral_point_load(const Eigen::VectorXd& mu, double fallback) {
+    const Mesh& m = t_sys.mesh;
+    const int nc = m.nc, ns = m.n_strips;
+    if (nc < 1 || ns < 1) return fallback;
+    // (surf, strip, jc) -> panel index, matching build_mesh's add order
+    // (lower surface first, then upper; each loops strip then chordwise j).
+    auto pid = [&](int surf, int sp, int jc) { return (surf * ns + sp) * nc + jc; };
+    double sumL = 0.0, sumLx = 0.0;
+    for (int sp = 0; sp < ns; ++sp) {
+        double x_le = m.strip_xqc[sp] - 0.25 * m.strip_chord[sp];
+        double x_te = x_le + m.strip_chord[sp];
+        // Trapezoidal INT D dx with endpoints (x_le, 0) and (x_te, D_te); the
+        // panel centroids supply the interior samples.
+        double intD = 0.0, prevx = x_le, prevD = 0.0, Dte = 0.0, xc_last = x_le;
+        for (int jc = 0; jc < nc; ++jc) {
+            int up = pid(1, sp, jc), lo = pid(0, sp, jc);
+            double D = mu(up) - mu(lo);
+            double xc = 0.5 * (quad_centroid(m.panels[up].q).x +
+                               quad_centroid(m.panels[lo].q).x);
+            intD += 0.5 * (D + prevD) * (xc - prevx);
+            prevx = xc; prevD = D; Dte = D; xc_last = xc;
+        }
+        intD += Dte * (x_te - xc_last);            // flat close to the camber TE
+        if (std::fabs(Dte) > 1e-12) {
+            double xcp = x_te - intD / Dte;
+            double L = Dte * m.strip_dy[sp];       // strip lift ~ Gamma * dy
+            sumL += L; sumLx += L * xcp;
+        }
+    }
+    return (std::fabs(sumL) > 1e-12) ? sumLx / sumL : fallback;
+}
+
 void ensure_system(const WingGeometry& w, const Config& cfg, double alpha) {
     int nc = cfg.geti("panel_chordwise", 10);
     bool half = half_cosine_spacing(cfg);
     double wlen = cfg.getd("panel_wake_chords", 20.0) * w.root_chord;
     Vec3 wdir(std::cos(alpha), 0.0, std::sin(alpha));   // freestream-aligned wake
-    bool stale = !t_sys.valid || t_sys.sig != geom_sig_panel(w, nc, half) ||
-                 std::fabs(alpha - t_sys.wake_alpha) > 1e-9;
+    bool geom_ok = t_sys.valid && t_sys.sig == geom_sig_panel(w, nc, half);
+    // Frozen-wake mode: once a system is built for this geometry, an alpha change
+    // reuses the existing factorization instead of rebuilding the dense N*N AIC.
+    // The RHS in solve() is recomputed from the live alpha regardless, so a frozen
+    // wake + perturbed freestream yields the exact partial derivative used by the
+    // trim Jacobian -- without the per-FD-step rebuild (the GA hot-path cost
+    // driver). Off by default; trim turns it on only for its Jacobian probes.
+    bool freeze = cfg.geti("panel_freeze_wake", 0) != 0;
+    bool stale = !geom_ok ||
+                 (!freeze && std::fabs(alpha - t_sys.wake_alpha) > 1e-9);
     if (stale) build_system(w, nc, wlen, wdir, half);
 }
 
@@ -505,7 +561,17 @@ double span_efficiency(const std::vector<double>& gamma) {
     for (int j = 0; j < M; ++j) den += modes[j] * C(j) * C(j);
     if (den <= 1e-30) return 1.0;
     double e = num / den;
-    return std::max(0.30, std::min(1.0, e));
+    // Sanity clamp ONLY. The inviscid planar span efficiency is physically in
+    // (0,1]. The lower bound is a NUMERICAL degeneracy guard -- it keeps CDi =
+    // CL^2/(pi*e*AR) finite when a washout-dominated, near-zero-net-lift loading
+    // makes the fundamental Glauert mode C_1 (hence the denominator's leading
+    // term) vanish -- NOT a physical floor. The previous 0.30 floor was a real
+    // bug: it clipped legitimately low-e designs and pinned e for ANY wing
+    // probed at low alpha (where basic/twist loading dominates). At the trim
+    // operating point, where the drag objective evaluates, e sits well inside
+    // the band (e.g. a moderately tapered, washed-out knee trims to e ~ 0.92).
+    constexpr double E_DEGEN = 0.05;
+    return std::max(E_DEGEN, std::min(1.0, e));
 }
 
 // ---- Pitch-control derivatives (linear flap heuristic; mesh is undeflected,
@@ -576,6 +642,28 @@ LoadingDump panel_loading_debug(const WingGeometry& w, const Config& cfg,
     return d;
 }
 
+XnpDebug panel_xnp_debug(const WingGeometry& w, const Config& cfg, double alpha) {
+    ensure_system(w, cfg, alpha);
+    XnpDebug d;
+    if (!t_sys.valid) return d;
+    Vec3 Vinf(std::cos(alpha), 0.0, std::sin(alpha));
+    double flux = 0.0;
+    Eigen::VectorXd mu = solve_mu(Vinf, flux);
+    double gmax = 0.0;
+    std::vector<double> g;
+    d.cl = trefftz_CL(mu, gmax, &g);
+    // Quarter-chord proxy (the legacy x_np): Gamma-weighted strip quarter-chord.
+    const Mesh& m = t_sys.mesh;
+    double sg = 0.0, sgx = 0.0;
+    for (int sp = 0; sp < m.n_strips; ++sp) {
+        sg  += g[sp] * m.strip_dy[sp];
+        sgx += g[sp] * m.strip_dy[sp] * m.strip_xqc[sp];
+    }
+    d.proxy = (std::fabs(sg) > 1e-12) ? sgx / sg : potential::wing_ac_x(w);
+    d.load  = neutral_point_load(mu, d.proxy);
+    return d;
+}
+
 // ---- Main aerodynamic solve (Morino panel + strip viscous coupling) -------
 AeroState solve(const WingGeometry& w, const MassProps& mp,
                 const viscous::Surrogate& surr, const Config& cfg,
@@ -603,12 +691,31 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
         panel_CL = trefftz_CL(mu, gmax, &gamma);
 
         // Neutral point: circulation-weighted quarter-chord (sweep-aware).
-        double sg = 0.0, sgx = 0.0;
+        double sg = 0.0, sgx = 0.0, sgabs = 0.0;
+        double xqc_lo = 1e300, xqc_hi = -1e300;
         for (int sp = 0; sp < m.n_strips; ++sp) {
-            sg  += gamma[sp] * m.strip_dy[sp];
-            sgx += gamma[sp] * m.strip_dy[sp] * m.strip_xqc[sp];
+            double wsp = gamma[sp] * m.strip_dy[sp];
+            sg  += wsp;
+            sgx += wsp * m.strip_xqc[sp];
+            sgabs += std::fabs(wsp);
+            xqc_lo = std::min(xqc_lo, m.strip_xqc[sp]);
+            xqc_hi = std::max(xqc_hi, m.strip_xqc[sp]);
         }
-        if (std::fabs(sg) > 1e-12) x_np = sgx / sg;
+        // The load-weighted centroid is only meaningful when there is net
+        // circulation. At low diagnostic alpha a washed-out / reflexed wing can
+        // carry near-zero NET load over large +/- local strip loads, so |sg|
+        // collapses while sgx stays finite -- a bare |sg|>1e-12 guard then flings
+        // x_np to +/-20 (a finite but DIVERGENT value that poisons the Pareto
+        // sort). Two guards: (1) require net load to be a non-trivial fraction of
+        // the gross absolute load, else keep the bounded geometric-AC fallback;
+        // (2) a true load centroid of quarter-chord points must lie within their
+        // own range, so clamp -- this stays exact for coherent loadings and
+        // repairs the mixed-sign cancellation case unconditionally.
+        if (sgabs > 1e-12 && std::fabs(sg) > 1e-3 * sgabs) {
+            x_np = sgx / sg;
+            if (xqc_hi >= xqc_lo)
+                x_np = std::min(xqc_hi, std::max(xqc_lo, x_np));
+        }
         e_panel = span_efficiency(gamma);
     }
     st.e = e_panel;

@@ -242,9 +242,10 @@ void build_vlm(const WingGeometry& w) {
 AeroState solve(const WingGeometry& w, const MassProps& mp,
                 const viscous::Surrogate& surr, const Config& cfg,
                 double alpha, double delta_e) {
-    // Milestone 3: dispatch to the Morino panel solver when selected. The VLM
-    // below remains the interim/fallback model (aero_model = vlm, default).
-    if (cfg.gets("aero_model", "vlm") == "panel")
+    // Milestone 3: the Morino panel solver is the default model of record
+    // (validated vs AVL within a few percent on the knee/min_drag/min_mass decks).
+    // The VLM below is the documented analytic fallback (aero_model = vlm).
+    if (cfg.gets("aero_model", "panel") != "vlm")
         return panel::solve(w, mp, surr, cfg, alpha, delta_e);
 
     AeroState st;
