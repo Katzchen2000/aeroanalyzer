@@ -49,10 +49,6 @@ endif()
 add_executable(aeroanalyzer app/main.cpp)
 target_link_libraries(aeroanalyzer PRIVATE aerocore)
 
-# Offline viscous-surrogate generator (drives XFOIL); not needed at runtime.
-add_executable(build_surrogate tools/build_surrogate.cpp)
-target_link_libraries(build_surrogate PRIVATE aerocore)
-
 enable_testing()
 file(GLOB TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
 add_executable(unit_tests ${TEST_SRC})

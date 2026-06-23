@@ -18,8 +18,7 @@
 param(
   [switch]$Test,
   [switch]$Run,
-  [switch]$OpenMP,
-  [switch]$Gen
+  [switch]$OpenMP
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +27,6 @@ $build = Join-Path $root "build"
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $build "build_app") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $build "build_tests") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $build "build_gen") | Out-Null
 
 # ---- locate vcvars64.bat ----
 $vcvars = $null
@@ -47,9 +45,17 @@ Write-Host "Using: $vcvars" -ForegroundColor DarkGray
 
 $omp = ""
 if ($OpenMP) { $omp = "/openmp" }
+
+# Eigen (header-only) is a hard dependency of the core lib (geom.cpp, aero_panel,
+# aero_potential). Use the same path as build_mingw.ps1.
+$eigen = "C:\Users\kadan\OneDrive\c++ libraries\eigen-5.0.0"
+if (-not (Test-Path (Join-Path $eigen "Eigen\Dense"))) {
+  Write-Error "Eigen not found at '$eigen' (Eigen\Dense missing). Fix the path in build.ps1."
+}
+
 # /fp:precise (NOT /fp:fast): keep IEEE semantics so the NaN/Inf watchdog checks
 # survive. See README, "Numerical strategy".
-$common = "/nologo /std:c++17 /O2 /fp:precise /EHsc /W3 /utf-8 $omp /I `"$root\include`""
+$common = "/nologo /std:c++17 /O2 /fp:precise /EHsc /W3 /utf-8 $omp /I `"$root\include`" /I `"$eigen`""
 
 $installerDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
 
@@ -66,11 +72,6 @@ $appArgs = "$common `"$root\src\*.cpp`" `"$root\app\main.cpp`" /Fe:aeroanalyzer.
 Invoke-Cl $appArgs "Building aeroanalyzer.exe"
 Write-Host "Built: $build\aeroanalyzer.exe" -ForegroundColor Green
 
-# ---- offline surrogate generator ----
-$genArgs = "$common `"$root\src\*.cpp`" `"$root\tools\build_surrogate.cpp`" /Fe:build_surrogate.exe /Fobuild_gen/"
-Invoke-Cl $genArgs "Building build_surrogate.exe"
-Write-Host "Built: $build\build_surrogate.exe" -ForegroundColor Green
-
 # ---- tests ----
 if ($Test) {
   $testArgs = "$common /I `"$root\tests`" `"$root\src\*.cpp`" `"$root\tests\*.cpp`" /Fe:unit_tests.exe /Fobuild_tests/"
@@ -80,14 +81,6 @@ if ($Test) {
   & (Join-Path $build "unit_tests.exe")
   if ($LASTEXITCODE -ne 0) { Write-Error "TESTS FAILED (exit $LASTEXITCODE)" }
   Write-Host "Tests passed." -ForegroundColor Green
-}
-
-# ---- generate viscous surrogate ----
-if ($Gen) {
-  Write-Host "==> Generating viscous surrogate (config\baseline.cfg)" -ForegroundColor Cyan
-  Push-Location $root
-  try { & (Join-Path $build "build_surrogate.exe") "config\baseline.cfg" }
-  finally { Pop-Location }
 }
 
 # ---- run app ----

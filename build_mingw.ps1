@@ -6,7 +6,6 @@
 
   Usage (from the project root):
     powershell -ExecutionPolicy Bypass -File build_mingw.ps1 -Test
-    powershell -ExecutionPolicy Bypass -File build_mingw.ps1 -Gen
     powershell -ExecutionPolicy Bypass -File build_mingw.ps1 -Run
 
   Keep this file pure ASCII (PowerShell 5.1 reads non-BOM files as ANSI; a UTF-8
@@ -15,7 +14,6 @@
 param(
   [switch]$Test,
   [switch]$Run,
-  [switch]$Gen,
   [switch]$Native
 )
 
@@ -54,56 +52,6 @@ if ($Native) { $common += '-march=native' }
 
 $srcs = (Get-ChildItem (Join-Path $root 'src') -Filter *.cpp).FullName
 
-# ---- XFOIL Fortran static library (optional accurate surrogate engine) ----
-# Compiles the real XFOIL 6.99 analysis core (tools/bin/Xfoil699src/src) plus
-# our C-callable wrapper (tools/xfoil_lib/xfwrap.f) and the no-op plot/menu
-# stubs into build/libxfoil.a. build_surrogate.exe links this for
-# surrogate_mode = xfoil_lib. Skipped (with a warning) if gfortran is absent,
-# in which case xfoil_lib mode falls back to native/synthetic at runtime.
-$xfoilLib = ""
-function Build-XfoilLib {
-  if (-not (Test-Path $gfortran)) {
-    Write-Host "gfortran not found at $gfortran -- skipping libxfoil.a (surrogate_mode=xfoil_lib unavailable)" -ForegroundColor Yellow
-    return ""
-  }
-  $xsrc = Join-Path $root 'tools\bin\Xfoil699src\src'
-  $lib  = Join-Path $root 'tools\xfoil_lib'
-  if (-not (Test-Path (Join-Path $xsrc 'xfoil.f'))) {
-    Write-Host "XFOIL sources not found at $xsrc -- skipping libxfoil.a" -ForegroundColor Yellow
-    return ""
-  }
-  $obj = Join-Path $build 'xfoil_obj'
-  New-Item -ItemType Directory -Force -Path $obj | Out-Null
-  $fflags = @('-O2','-std=legacy','-fallow-argument-mismatch','-I', $xsrc)
-  # Verified-sufficient analysis-core source set (no plot/menu/design files).
-  $core = @('aread','naca','sort','spline','userio','xbl','xblsys','xgeom',
-            'xoper','xpanel','xsolve','xutils')
-  Write-Host "==> Building libxfoil.a (gfortran)" -ForegroundColor Cyan
-  foreach ($f in $core) {
-    & $gfortran @fflags -c (Join-Path $xsrc "$f.f") -o (Join-Path $obj "$f.o")
-    if ($LASTEXITCODE -ne 0) { Write-Error "gfortran failed on $f.f" }
-  }
-  # xfoil.f defines PROGRAM XFOIL (collides with the C++ main); patch it to a
-  # plain SUBROUTINE in a build-dir copy so the analysis routines still link.
-  $patched = Join-Path $obj 'xfoil_nomain.f'
-  (Get-Content (Join-Path $xsrc 'xfoil.f')) `
-    -replace '^      PROGRAM XFOIL', '      SUBROUTINE XF_NOMAIN' |
-    Set-Content -Encoding ascii $patched
-  & $gfortran @fflags -c $patched              -o (Join-Path $obj 'xfoil.o')
-  if ($LASTEXITCODE -ne 0) { Write-Error "gfortran failed on patched xfoil.f" }
-  & $gfortran @fflags -c (Join-Path $lib 'xfwrap.f')  -o (Join-Path $obj 'xfwrap.o')
-  if ($LASTEXITCODE -ne 0) { Write-Error "gfortran failed on xfwrap.f" }
-  & $gfortran @fflags -c (Join-Path $lib 'xfstubs.f') -o (Join-Path $obj 'xfstubs.o')
-  if ($LASTEXITCODE -ne 0) { Write-Error "gfortran failed on xfstubs.f" }
-  $outLib = Join-Path $build 'libxfoil.a'
-  Remove-Item -Force $outLib -ErrorAction SilentlyContinue
-  $objs = (Get-ChildItem $obj -Filter *.o).FullName
-  & $ar rcs $outLib @objs
-  if ($LASTEXITCODE -ne 0) { Write-Error "ar failed building libxfoil.a" }
-  Write-Host "Built: $outLib" -ForegroundColor Green
-  return $outLib
-}
-
 function Build([string[]]$extra, [string]$outName, [string]$label) {
   Write-Host "==> $label" -ForegroundColor Cyan
   $argList = $common + $srcs + $extra + @('-o', (Join-Path $build $outName))
@@ -112,19 +60,8 @@ function Build([string[]]$extra, [string]$outName, [string]$label) {
   Write-Host "Built: $build\$outName" -ForegroundColor Green
 }
 
-# ---- application + offline surrogate generator ----
-# The runtime optimizer never links XFOIL (stays GPL-free / dependency-free).
+# ---- application ----
 Build @((Join-Path $root 'app\main.cpp')) "aeroanalyzer.exe" "Building aeroanalyzer.exe"
-
-# Only the offline surrogate generator links libxfoil.a (for xfoil_lib mode).
-$xfoilLib = Build-XfoilLib
-$bsExtra = @((Join-Path $root 'tools\build_surrogate.cpp'))
-if ($xfoilLib -ne "") {
-  # -DHAVE_XFOIL_LIB enables the xfoil_lib engine + the self-spawning worker
-  # pool; the gfortran runtime libs satisfy libxfoil.a's references.
-  $bsExtra = @('-DHAVE_XFOIL_LIB') + $bsExtra + @($xfoilLib, '-lgfortran', '-lquadmath')
-}
-Build $bsExtra "build_surrogate.exe" "Building build_surrogate.exe"
 
 # ---- tests ----
 if ($Test) {
@@ -138,14 +75,6 @@ if ($Test) {
   & (Join-Path $build 'unit_tests.exe')
   if ($LASTEXITCODE -ne 0) { Write-Error "TESTS FAILED (exit $LASTEXITCODE)" }
   Write-Host "Tests passed." -ForegroundColor Green
-}
-
-# ---- generate viscous surrogate ----
-if ($Gen) {
-  Write-Host "==> Generating viscous surrogate" -ForegroundColor Cyan
-  Push-Location $root
-  try { & (Join-Path $build 'build_surrogate.exe') "config\baseline.cfg" }
-  finally { Pop-Location }
 }
 
 # ---- run optimizer ----

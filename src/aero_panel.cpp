@@ -757,7 +757,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
 
         double Re      = RHO * V * cosL * chord / MU;
         double cl_norm = cl_i / (cosL * cosL);
-        viscous::Polar pol = surr.query(shape, cl_norm, Re);
+        viscous::Polar pol = surr.query(shape, cl_norm, Re, w.section.te_thick);
 
         double ramp = 0.0;
         if (sweep_deg > xflow_deg - 3.0) {

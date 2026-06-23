@@ -19,6 +19,7 @@ TEST(surrogate_tables_load_and_query) {
              "0.012,0.014,1.25,-0.60,0.02\n";
     }
     Config cfg;
+    cfg.set("viscous_backend", "table");   // exercise the legacy IDW path
     viscous::Surrogate surr;
     bool ok = surr.load(dir, cfg);
     CHECK(ok);
@@ -40,6 +41,7 @@ TEST(surrogate_tables_load_and_query) {
 
 TEST(surrogate_missing_table_falls_back) {
     Config cfg;
+    cfg.set("viscous_backend", "table");   // no weights, no CSV -> analytic
     viscous::Surrogate surr;
     bool ok = surr.load("___no_such_surrogate_dir___", cfg);
     CHECK(!ok);
