@@ -24,11 +24,12 @@ Deb's **constraint-domination**.
 7. [Airfoil seeds](#airfoil-seeds-ancestry-injection)
 8. [Viscous surrogate](#viscous-surrogate-xfoil-offline)
 9. [Numerical strategy](#numerical-strategy-deliberate-choices)
-10. [Configuration reference](#configuration-reference)
-11. [Validation & tests](#validation--tests)
-12. [Known limitations / approximations](#known-limitations--approximations)
-13. [Roadmap](#roadmap)
-14. [Equations reference](#equations-reference)
+10. [Performance & cost](#performance--cost)
+11. [Configuration reference](#configuration-reference)
+12. [Validation & tests](#validation--tests)
+13. [Known limitations / approximations](#known-limitations--approximations)
+14. [Roadmap](#roadmap)
+15. [Equations reference](#equations-reference)
 
 ---
 
@@ -41,7 +42,7 @@ Deb's **constraint-domination**.
 | Stability & trim (Newton, SM objective, watchdogs) | ✅ implemented + tested |
 | NSGA-II (fronts, crowding, SBX/PM, constraint-domination) | ✅ implemented + tested |
 | Airfoil seeds (.dat + NACA) + ancestry injection | ✅ implemented + tested |
-| Viscous surrogate (XFOIL-calibrated, shape-parameterized) | ✅ runtime + offline tool |
+| Viscous surrogate (native in-process XFOIL-class solver, shape-parameterized) | ✅ runtime + offline tool (weak coupling; strong-coupling Newton pending) |
 | **3D aerodynamics** | ✅ **Morino panel solver (default)** — AVL-validated; VLM is the fallback |
 
 3D aerodynamics defaults to the **Morino Dirichlet panel solver** (`aero_model = panel`,
@@ -57,27 +58,37 @@ is cross-checked against **AVL** on the `knee` / `min_drag` / `min_mass` decks �
 
 ## Build it yourself
 
-You have the VS2022 **Build Tools** (`cl.exe`) but no CMake — so the primary path needs
-no CMake:
+Two no-CMake build scripts. **`build_mingw.ps1` is the primary path** because the default
+Morino panel solver needs **Eigen** (header-only) for its dense AIC factorization, and the
+MinGW (MSYS2 `g++`) toolchain links Eigen and the optional XFOIL Fortran library with one
+compiler:
 
 ```powershell
-# from the project root
-powershell -ExecutionPolicy Bypass -File build.ps1 -Test    # build + run unit tests
-powershell -ExecutionPolicy Bypass -File build.ps1 -Gen     # build + generate viscous surrogate
-powershell -ExecutionPolicy Bypass -File build.ps1 -Run     # build + run the optimizer
-powershell -ExecutionPolicy Bypass -File build.ps1 -OpenMP  # multicore GA evaluation
+# from the project root (needs MSYS2 mingw-w64 g++ + Eigen; paths set at the top of the script)
+powershell -ExecutionPolicy Bypass -File build_mingw.ps1 -Test   # build + run the 42 unit-test gates
+powershell -ExecutionPolicy Bypass -File build_mingw.ps1 -Gen    # build + generate the viscous surrogate
+powershell -ExecutionPolicy Bypass -File build_mingw.ps1 -Run    # build + run the optimizer
 ```
 
-Flags combine, e.g. `build.ps1 -Test -Gen -Run`. `build.ps1` locates `vcvars64.bat` and
-drives `cl.exe` directly. It builds three executables into `build\`:
-`aeroanalyzer.exe` (optimizer), `build_surrogate.exe` (offline surrogate generator),
-`unit_tests.exe`.
+`build.ps1` (MSVC `cl.exe`, no CMake) is the **Eigen-free fallback** — it builds the VLM
+model and all non-panel gates, but cannot build the panel solver:
 
-> **Editing `build.ps1`:** keep it **pure ASCII**. PowerShell 5.1 reads non-BOM files as
+```powershell
+powershell -ExecutionPolicy Bypass -File build.ps1 -Test -Gen -Run -OpenMP   # flags combine
+```
+
+Either script builds three executables into `build\`: `aeroanalyzer.exe` (optimizer),
+`build_surrogate.exe` (offline surrogate generator), `unit_tests.exe`.
+
+> **Editing `build*.ps1`:** keep them **pure ASCII**. PowerShell 5.1 reads non-BOM files as
 > ANSI, and a UTF-8 em-dash decodes to a curly quote that PS treats as a string
 > delimiter — which silently breaks the parse. (This bit us once already.)
+>
+> **Eigen + optimization level:** Eigen 5.0.0 fails to *link* at `-O0` with this MinGW
+> toolchain; build at `-O2` (what `build_mingw.ps1` uses) for anything that links Eigen.
 
-**CMake alternative** (after `winget install Kitware.CMake`):
+**CMake alternative** (after `winget install Kitware.CMake`): Eigen is wired via
+`find_package` + `AERO_HAVE_EIGEN`.
 
 ```powershell
 cmake -B build -S .
@@ -85,10 +96,10 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-The runtime binary has **zero external dependencies** (self-contained linear algebra in
-`include/aeroanalyzer/linalg.h`). Eigen is wired as *optional* in CMake (`find_package`
-+ `AERO_HAVE_EIGEN`) for the future panel solver but is not required to build today.
-OpenMP is auto-detected and used only to parallelize candidate evaluation.
+Apart from Eigen (panel solver) the runtime is dependency-light — self-contained linear
+algebra in `include/aeroanalyzer/linalg.h` backs the VLM path. OpenMP is auto-detected and
+used only to parallelize candidate evaluation (the panel cache is `thread_local`, so the
+parallel run stays byte-identical to serial).
 
 ---
 
@@ -162,7 +173,7 @@ include/aeroanalyzer/   public headers (linalg, engine_core, geom, massprops,
 src/                    implementations (one .cpp per header that needs one)
 app/main.cpp            optimizer driver (thin)
 tools/build_surrogate.cpp   offline XFOIL surrogate generator (separate exe)
-tests/                  dependency-free unit tests (31 gates) + test_harness.h
+tests/                  dependency-free unit tests (42 gates) + test_harness.h
 config/baseline.cfg     all tunables (key = value)
 data/airfoils/          drop seed .dat files here
 data/surrogates/        generated polar_coeffs.csv
@@ -255,9 +266,11 @@ across (shape, Re).
 ### Phase 5 — Stability & trim (`stability.cpp`)
 
 - **Trim:** Newton–Raphson on `(α, δ_e)` solving `CL = W/(q·S)` and `Cm = 0`
-  simultaneously. The 2×2 Jacobian is built by **finite differences** of `solve()` so it
-  stays valid when the nonlinear panel solver swaps in. Step-clamped (≤5°) for robustness;
-  `state.trimmed = false` if it fails to converge (which the constraints penalize hard).
+  simultaneously. The 2×2 Jacobian is built by **finite differences** of `solve()`, which
+  keeps it valid for the nonlinear panel solver. Step-clamped (≤5°) for robustness;
+  `state.trimmed = false` if it fails to converge (which the constraints penalize hard). For
+  the panel model the wake is **frozen across the whole Newton solve** so the dense AIC is
+  built once per candidate, not once per α step — see [Performance](#performance--cost).
 - **SM objective:** `sm_objective(SM, lo, hi)` = 0 inside the band, else distance to the
   nearest edge (this is the minimized third objective).
 
@@ -332,15 +345,33 @@ At runtime the surrogate interpolates those coefficients across (shape, Re) with
 **convex-hull guard** — queries outside the trained region are flagged (`clamped`), never
 silently extrapolated. The runtime binary never calls XFOIL.
 
-Two modes (config `surrogate_mode`):
+Three modes (config `surrogate_mode`):
 
-- **`synthetic`** (default) — analytic calibration, **no XFOIL needed**; lets you exercise
-  the full table pipeline now. Coefficients still vary with shape (thickness/camber) and
-  Re so interpolation is meaningful.
+- **`native`** (default) — an **in-process viscous solver** (`src/aero_xfoil.cpp`,
+  namespace `aero::xfoil`): a clean C++/Eigen reimplementation of the core XFOIL algorithm —
+  Hess–Smith source+vortex inviscid panel method coupled to a two-equation integral boundary
+  layer with envelope-e^n transition, the closures ported faithfully from Drela's `xblsys.f`.
+  **Zero disk I/O, no subprocess** — it ingests the CST `Airfoil` from memory, sweeps alpha,
+  and the existing `fit_polar()` compresses the polar. The Fortran Gaussian elimination is
+  gone (Eigen `PartialPivLU`, factored once per geometry and reused across alpha). Robust:
+  ~99% of the seed+DoE × Re grid converges; non-converged rows fall back to synthetic.
+- **`synthetic`** — analytic calibration, no solver needed; exercises the table pipeline
+  with coefficients that still vary with shape (thickness/camber) and Re.
 - **`xfoil`** — drives standalone `xfoil.exe` (set `xfoil_exe`, **no Python required**) per
   (shape, Re): writes a `.dat`, scripts `OPER/VPAR N/VISC Re/PACC/ASEQ`, parses the polar
-  dump, and least-squares-fits the compact polar. Rows that fail to converge fall back to
-  synthetic.
+  dump, and least-squares-fits the compact polar. Retained as a validation oracle; rows that
+  fail fall back to synthetic.
+
+**Native-solver fidelity (vs `xfoil.exe`, NACA0012/2412/4412 @ Re 2e5, see
+`scratch/xfoil_xcheck.cpp`):** `cd0` lands in the M4 acceptance band (0.012–0.02) for every
+section and `cd` tracks XFOIL to a few percent in the symmetric mid-band. The coupling is
+currently **weak** (the BL is marched on the inviscid edge velocity), which biases `cd`
+high by ~20–30 % on cambered, aft-loaded sections (no displacement to fill the pressure
+recovery) and leaves `cl` un-decambered. The **strong** transpiration interaction is built
+(`Mresp` edge-velocity response matrix + an under-relaxed sweep behind `Options::strong_coupling`)
+but the explicit fixed point is unstable where a laminar separation bubble drives a steep
+`d(δ*)/ds`; closing that gap cleanly needs the implicit simultaneous Newton (the next
+refinement). Weak coupling is the robust default and meets the documented acceptance.
 
 **`polar_coeffs.csv` format:** comment lines start with `#`; data rows are
 `wu0,wu1,wu2,wu3,wl0,wl1,wl2,wl3,Re,cd0,k,cl_max,cl_min,cm0` (8 shape + Re + 5 coeffs).
@@ -362,6 +393,59 @@ warning, so the optimizer always runs.
   preconditioned iterative solver under fast-math is the opposite of that.
 - **Reproducibility.** Evaluation is deterministic; RNG is seeded (`ga_seed`). The same
   config + seed yields a byte-identical `pareto.csv`, **even with OpenMP** (verified).
+
+---
+
+## Performance & cost
+
+The per-candidate aerodynamic cost is dominated by **building the dense panel AIC matrix**
+(transcendental influence kernels), rebuilt once per geometry. Everything else — LU
+back-substitution, strip viscous coupling, mass/geometry — is comparatively free.
+
+**Per-operation, single-thread** (Morino panel, measured via `scratch/panel_timing.cpp`):
+
+| Operation | `panel_chordwise = 10` (default) | `= 6` |
+|-----------|---------------------------------:|------:|
+| Cold panel `solve()` (1 AIC build) | ~256 ms | ~92 ms |
+| Trimmed `trim()` — **wake-frozen (default)** | ~266 ms | ~104 ms |
+| Trimmed `trim()` — legacy (rebuild per Newton step) | ~3.4 s | ~1.5 s |
+| VLM `trim()` (fallback model) | ~5 ms | ~5 ms |
+
+**Full optimizer run** (`ga_pop 120 × ga_generations 150` = 18 000 trims, 12 threads):
+
+| Model | Projected wall-clock |
+|-------|---------------------:|
+| **Panel, nc = 10 (default)** | **~6–7 min** |
+| Panel, nc = 6 | ~2.5 min |
+| VLM fallback | ~10 s |
+
+Build/test turnaround: a full `build_mingw.ps1 -Test` (clean compile of all `src/` + Eigen
+at `-O2`, then the 42 gates) is ~2–3 min, dominated by the Eigen template compile.
+
+### The wake-freeze optimization
+
+`stability::trim()` solves `(α, δ_e)` with a Newton iteration whose per-iteration residual
+**and** finite-difference Jacobian each call `solve()`. The panel AIC cache is keyed on the
+wake angle, so every α change used to force a full rebuild — making a trim ~13× the cost of
+one solve. But the wake **inclination** has negligible effect on attached loading (verified:
+`dCL ~1e-11`, `dx_np ~15 µm` between a wake frozen at the initial α and one tracking α), so
+`trim()` now **freezes the wake for the whole Newton solve** (`panel_trim_freeze_wake = 1`,
+default): exactly **one AIC build per candidate**. The RHS still uses the live α, so the FD
+derivative stays exact. This took the full GA from ~85 min to ~6–7 min. Set
+`panel_trim_freeze_wake = 0` (and `panel_trim_freeze_jac = 0`) to restore the legacy
+rebuild-every-step behavior for comparison.
+
+### Tuning levers (biggest first)
+
+- **`panel_chordwise`** — the dominant cost knob; AIC assembly grows steeply with panel
+  count. `10` is the converged default; `6` is ~2.6× faster and still passes the chordwise-
+  convergence gate.
+- **`aero_model = vlm`** — the analytic fallback is ~40× faster than the panel, but does not
+  track washout (it reports a near-flat span efficiency); use it for quick exploratory sweeps,
+  the panel for the final front.
+- **OpenMP** — candidate evaluation parallelizes near-linearly; the `thread_local` panel
+  cache keeps the parallel run byte-identical to serial.
+- **`ga_pop` / `ga_generations`** — wall-clock scales linearly with their product.
 
 ---
 
@@ -394,7 +478,13 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 | `sweep_crossflow_deg` | 25.0 | LE-sweep crossflow threshold (°) |
 | `crossflow_factor` | 1.15 | outer-span profile-drag multiplier |
 | `ncrit` | 4.0 | surrogate transition Ncrit (printed roughness) |
-| `surrogate_mode` | `synthetic` | `synthetic` or `xfoil` |
+| `aero_model` | `panel` | 3D model: `panel` (Morino, default) or `vlm` (analytic fallback) |
+| `panel_chordwise` | 10 | chordwise panels per surface (dominant cost knob; see [Performance](#performance--cost)) |
+| `panel_chord_spacing` | `halfcosine` | chordwise node spacing: `halfcosine` (convergent) or `cosine` (legacy) |
+| `panel_wake_chords` | 20 | trailing wake length, in root chords |
+| `panel_trim_freeze_wake` | 1 | freeze the wake across the trim Newton solve (~13× faster; 0 = legacy) |
+| `panel_trim_freeze_jac` | 1 | freeze the wake across the trim FD Jacobian probes only |
+| `surrogate_mode` | `native` | `native` (in-process), `synthetic`, or `xfoil` (oracle) |
 | `xfoil_exe` | `tools/bin/xfoil.exe` | standalone XFOIL path (xfoil mode) |
 | `avl_exe` | `tools/bin/avl.exe` | standalone AVL path (cross-check; manual for now) |
 | `surrogate_samples` | 300 | DoE shapes sampled around the seeds |
@@ -411,16 +501,18 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 
 ## Validation & tests
 
-`build.ps1 -Test` builds and runs **31 dependency-free gates** (`tests/`, harness in
+`build_mingw.ps1 -Test` builds and runs **42 dependency-free gates** (`tests/`, harness in
 `test_harness.h`). Grouped:
 
 - **Geometry** — CST round-trip, symmetric→zero camber, cambered→negative `α_L0`,
   reflex→`cm_ac` shift, rectangular planform area/AR, cosine lofting.
 - **Mass** — solid-infill volume vs closed form, structure-only CG at ~0.42c, battery
   shift moves CG, spar clearance bounded.
-- **Aero (Milestone-3 gates)** — Prandtl lift slope `2π·AR/(AR+2)`, Oswald range,
-  induced-drag consistency, lift increases with α, **trim converges** to `CL_req`/`Cm=0`,
-  SM-objective band, surrogate hull clamp.
+- **Aero (Milestone-3 gates)** — run for **both** models: Prandtl lift slope `2π·AR/(AR+2)`,
+  Oswald range, induced-drag consistency, lift increases with α, **trim converges** to
+  `CL_req`/`Cm=0`, SM-objective band, surrogate hull clamp. Panel-specific: panel lift slope
+  vs Prandtl, elliptic `e≈1`, chordwise convergence, washout loading sign/slope survival,
+  quarter-chord neutral point, geometry-change cache invalidation.
 - **Surrogate** — table load + IDW query + hull/cl clamps, analytic fallback when absent.
 - **Airfoil I/O** — NACA 0012 max-thickness ≈ 12%, NACA 2412 cambered, NACA→CST round-trip,
   Selig + Lednicer parse.
@@ -474,10 +566,20 @@ unchanged signature.
   elliptic `e≈1`, trim, quarter-chord NP) **and** matches AVL within a few percent on the
   knee/min_drag/min_mass decks. The VLM remains the documented fallback (`aero_model = vlm`).
 
-### Milestone 4 — Real viscous tables
-Run `build_surrogate.exe` with `surrogate_mode = xfoil` over the seed + DoE shapes; widen
-the Reynolds grid; verify NACA 0012 @ Re 2e5 gives `cd0 ≈ 0.012–0.02`. Add a fallback
-log/report of XFOIL convergence rate.
+### Milestone 4 — Real viscous tables ✅ (native solver; strong coupling pending)
+`build_surrogate.exe` now defaults to `surrogate_mode = native`: an in-process C++/Eigen
+reimplementation of XFOIL's core (`src/aero_xfoil.cpp`) replaces the disk-churning
+`xfoil.exe` subprocess — Hess–Smith panel + Drela integral BL + envelope-e^n transition +
+inverse-mode laminar-bubble traversal + far-wake Squire–Young drag, **zero disk I/O**, the
+Fortran Gauss solve replaced by Eigen. Verified: NACA 0012 @ Re 2e5 gives `cd0` in
+`0.012–0.02`; ~99 % of the seed+DoE × Re grid converges (12/1244 rows fall back to
+synthetic); `tests/test_xfoil.cpp` gates the inviscid slope, cd0 band, transition movement,
+drag bucket, and determinism. Cross-check tooling: `scratch/xfoil_xcheck.cpp` tabulates the
+native solver against real `xfoil.exe`. **Open item:** the viscous–inviscid coupling is weak
+(inviscid edge velocity); `cd` runs ~20–30 % high on cambered sections and `cl` is
+un-decambered. The strong transpiration interaction is scaffolded (`Options::strong_coupling`,
+`Mresp`) but needs the implicit simultaneous Newton to be stable through separation bubbles —
+the next refinement before flipping it on by default.
 
 ### Milestone 5 — High-α & nonlinear stability
 Replace the NP-migration heuristic with a high-α evaluation from the panel solver; add a

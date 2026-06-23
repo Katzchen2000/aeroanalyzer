@@ -5,7 +5,9 @@
 // data/surrogates/polar_coeffs.csv for the runtime to interpolate.
 //
 //   surrogate_mode = synthetic   -> analytic calibration (no XFOIL; runs now)
-//   surrogate_mode = xfoil       -> drive xfoil.exe per (shape, Re)
+//   surrogate_mode = native      -> in-process aero::xfoil solver (no subprocess,
+//                                   no disk I/O; the M4 default)
+//   surrogate_mode = xfoil       -> drive the legacy xfoil.exe per (shape, Re)
 //
 // The runtime binary never depends on XFOIL — only this offline tool does.
 #include <iostream>
@@ -23,6 +25,7 @@
 #include "aeroanalyzer/seeds.h"
 #include "aeroanalyzer/geom.h"
 #include "aeroanalyzer/airfoil_io.h"
+#include "aeroanalyzer/aero_xfoil.h"
 #include <Eigen/Dense>
 
 using namespace aero;
@@ -121,6 +124,21 @@ bool fit_polar(const std::vector<double>& cl, const std::vector<double>& cd,
     return true;
 }
 
+// Native in-process polar: sweep the aero::xfoil solver and fit the compact
+// polar from the converged points. No subprocess, no temp files.
+bool native_coeffs(const Airfoil& f, double Re, double ncrit, Coeffs& out) {
+    xfoil::Options opt;
+    opt.Ncrit = ncrit;
+    std::vector<xfoil::Result> sweep = xfoil::sweep(f, -6.0, 12.0, 1.0, Re, opt);
+    std::vector<double> cl, cd, cm;
+    for (const auto& r : sweep)
+        if (r.converged && std::isfinite(r.cd) && std::isfinite(r.cl)) {
+            cl.push_back(r.cl); cd.push_back(r.cd); cm.push_back(r.cm);
+        }
+    if (cl.size() < 4) return false;
+    return fit_polar(cl, cd, cm, out);
+}
+
 bool xfoil_coeffs(const Airfoil& f, double Re, double ncrit,
                   const std::string& xfoil_exe, const std::string& tmp,
                   Coeffs& out) {
@@ -207,7 +225,8 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories("data/surrogates");
     std::filesystem::create_directories("build/xfoil_tmp");
 
-    bool use_xfoil = (mode == "xfoil");
+    bool use_xfoil  = (mode == "xfoil");
+    bool use_native = (mode == "native");
     if (use_xfoil) {
         // probe: does xfoil run at all?
         if (std::system(("\"" + xfoil_exe + "\" < nul > nul 2>&1").c_str()) != 0)
@@ -228,9 +247,11 @@ int main(int argc, char** argv) {
             bool ok = false;
             if (use_xfoil)
                 ok = xfoil_coeffs(f, Re, ncrit, xfoil_exe, "build/xfoil_tmp", c);
+            else if (use_native)
+                ok = native_coeffs(f, Re, ncrit, c);
             if (ok) ++xf_ok;
             else {
-                if (use_xfoil) ++xf_fail;
+                if (use_xfoil || use_native) ++xf_fail;
                 c = synthetic_coeffs(f, Re, ncrit);   // fallback / synthetic
             }
             csv << s[0] << "," << s[1] << "," << s[2] << "," << s[3] << ","
@@ -243,8 +264,8 @@ int main(int argc, char** argv) {
     csv.close();
     std::cout << "wrote data/surrogates/polar_coeffs.csv: " << rows << " rows ("
               << shapes.size() << " shapes x " << res.size() << " Re)\n";
-    if (use_xfoil)
-        std::cout << "  xfoil: " << xf_ok << " ok, " << xf_fail
+    if (use_xfoil || use_native)
+        std::cout << "  " << mode << ": " << xf_ok << " ok, " << xf_fail
                   << " fell back to synthetic\n";
     return 0;
 }
