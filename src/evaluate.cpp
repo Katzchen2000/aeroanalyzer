@@ -4,7 +4,6 @@
 #include "aeroanalyzer/stability.h"
 #include <cmath>
 #include <algorithm>
-#include <iostream>
 
 namespace aero {
 
@@ -32,20 +31,6 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     } else {
         r.aero = stability::trim(r.geom, r.mp, surr_, cfg_);
     }
-
-    // ---- diagnostic print ----
-    std::cout << "CL=" << r.aero.CL
-              << " CM=" << r.aero.CM
-              << " trimmed=" << r.aero.trimmed
-              << " SM=" << r.aero.static_margin
-              << " x_np=" << r.aero.x_np
-              << " x_cg=" << r.mp.x_cg
-              << " x_np_high=" << r.aero.x_np_high
-              << " tip_stall=" << r.aero.tip_stall
-              << " roll_helix=" << r.aero.roll_helix
-              << " hinge=" << r.aero.hinge_moment
-              << " cn_da=" << r.aero.cn_da
-              << "\n";
 
     const double V = cfg_.getd("v_cruise", V_CRUISE);
     const double q = 0.5 * RHO * V * V;
