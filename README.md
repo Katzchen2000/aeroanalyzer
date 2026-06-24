@@ -318,6 +318,7 @@ fatal ones dominate the merely marginal:
 | SM band floor | `SM < sm_band_lo` (keeps the front in the ≥6% band) | `sm_floor_penalty` (30; 0 = off) |
 | Roll authority (M6) | `roll_helix < roll_helix_min` (pb/2V floor) | 30 |
 | Hardware keep-out (M6) | motor/avionics don't fit in section | 30 |
+| Section validity | interior min thickness `< min_thickness_frac` (blocks self-intersecting figure-8 sections) | 40 |
 
 ---
 

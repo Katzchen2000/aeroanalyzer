@@ -30,7 +30,8 @@ public:
     const seeds::SeedSet& seeds() const { return seeds_; }
 
 private:
-    EvalResult run(const std::vector<double>& genes) const;
+    // relaxed_wake: reporting path enables the panel relaxed-wake CDi pass.
+    EvalResult run(const std::vector<double>& genes, bool relaxed_wake = false) const;
 
     const Config& cfg_;
     geom::GenomeSpec spec_;
