@@ -2,6 +2,7 @@
 #include "aeroanalyzer/seeds.h"
 #include "aeroanalyzer/geom.h"
 #include "aeroanalyzer/config.h"
+#include <cmath>
 
 using namespace aero;
 
@@ -39,6 +40,34 @@ TEST(seed_genome_decodes_to_seed_shape) {
     WingGeometry w = geom::decode(g[0], spec);
     for (int i = 0; i < 4; ++i)
         CHECK_NEAR(w.section.wu[i], s.airfoils[0].wu[i], 1e-6);
+}
+
+// Elite seeds duplicate the root section into the tip genes (no jitter), so the
+// loft starts uniform; the GA discovers spanwise variation from there.
+TEST(seed_tip_duplicates_root_for_elite) {
+    seeds::SeedSet s = seeds::load_seeds(naca_only("2412"));
+    geom::GenomeSpec spec = geom::default_genome();
+    seeds::widen_cst_bounds(spec, s, 0.04);
+    auto g = seeds::build_seed_genomes(spec, s, 1, 6);   // index 0 = elite
+    WingGeometry w = geom::decode(g[0], spec);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_NEAR(w.section_tip.wu[i], w.section.wu[i], 1e-9);
+        CHECK_NEAR(w.section_tip.wl[i], w.section.wl[i], 1e-9);
+    }
+}
+
+// Hybrid seeds jitter root and tip independently -> a distinct tip section, so
+// the seeded population carries real spanwise diversity from generation 0.
+TEST(seed_tip_jitters_for_hybrid) {
+    seeds::SeedSet s = seeds::load_seeds(naca_only("2412"));
+    geom::GenomeSpec spec = geom::default_genome();
+    seeds::widen_cst_bounds(spec, s, 0.04);
+    auto g = seeds::build_seed_genomes(spec, s, 1, 10, 0.3);  // jitter on
+    WingGeometry w = geom::decode(g.back(), spec);            // a hybrid (k >= n_elite)
+    bool differs = false;
+    for (int i = 0; i < 4; ++i)
+        if (std::fabs(w.section_tip.wu[i] - w.section.wu[i]) > 1e-6) differs = true;
+    CHECK(differs);
 }
 
 TEST(seeds_empty_when_none) {

@@ -74,8 +74,12 @@ void widen_cst_bounds(geom::GenomeSpec& spec, const SeedSet& s, double margin) {
     };
     using namespace geom;
     for (const auto& f : s.airfoils) {
-        for (int i = 0; i < 4 && i < (int)f.wu.size(); ++i) widen(G_WU0 + i, f.wu[i]);
-        for (int i = 0; i < 4 && i < (int)f.wl.size(); ++i) widen(G_WL0 + i, f.wl[i]);
+        for (int i = 0; i < 4 && i < (int)f.wu.size(); ++i) {
+            widen(G_WU0 + i, f.wu[i]);  widen(G_TIP_WU0 + i, f.wu[i]);
+        }
+        for (int i = 0; i < 4 && i < (int)f.wl.size(); ++i) {
+            widen(G_WL0 + i, f.wl[i]);  widen(G_TIP_WL0 + i, f.wl[i]);
+        }
         widen(G_TE, f.te_thick);
     }
     // keep TE strictly positive
@@ -117,6 +121,10 @@ std::vector<std::vector<double>> build_seed_genomes(
         for (int i = 0; i < 4 && i < (int)af.wu.size(); ++i) put(G_WU0 + i, af.wu[i]);
         for (int i = 0; i < 4 && i < (int)af.wl.size(); ++i) put(G_WL0 + i, af.wl[i]);
         put(G_TE, af.te_thick);
+        // tip section: elites duplicate the root; hybrids jitter independently,
+        // giving real root!=tip spanwise variation in the seeded population.
+        for (int i = 0; i < 4 && i < (int)af.wu.size(); ++i) put(G_TIP_WU0 + i, af.wu[i]);
+        for (int i = 0; i < 4 && i < (int)af.wl.size(); ++i) put(G_TIP_WL0 + i, af.wl[i]);
 
         // elites: settle planform at mid-box; hybrids keep the random planform
         if (elite)
