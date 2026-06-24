@@ -85,6 +85,14 @@ EvalResult Evaluator::run(const std::vector<double>& genes) const {
         cv += 30.0 * (-r.mp.hw_clearance) / hw_ref;
     }
 
+    // (11) static-margin band floor: the OBJ_SM band is only an objective, so
+    // the drag-minimizing corner of the front sits below sm_lo (less washout =>
+    // less trim drag). This hard cv gate forces every feasible design into the
+    // >= sm_band_lo region. sm_floor_penalty = 0 recovers the soft-only behavior.
+    double sm_floor_pen = cfg_.getd("sm_floor_penalty", 30.0);
+    if (sm_floor_pen > 0.0 && r.aero.static_margin < sm_lo)
+        cv += sm_floor_pen * (sm_lo - r.aero.static_margin) / sm_lo;
+
     r.cv = cv;
     return r;
 }

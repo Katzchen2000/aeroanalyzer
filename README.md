@@ -315,6 +315,7 @@ fatal ones dominate the merely marginal:
 | Tip-stall watchdog (§6) | outboard station stalled at cruise | 20 |
 | Trim convergence | Newton failed to trim | 100 |
 | Static stability floor | `SM < 0` (NP forward of CG) | 25 |
+| SM band floor | `SM < sm_band_lo` (keeps the front in the ≥6% band) | `sm_floor_penalty` (30; 0 = off) |
 | Roll authority (M6) | `roll_helix < roll_helix_min` (pb/2V floor) | 30 |
 | Hardware keep-out (M6) | motor/avionics don't fit in section | 30 |
 
@@ -486,6 +487,7 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 | `te_thick_min_mm` | 0.8 | trailing-edge thickness floor (mm) |
 | `re_tip_min` | 100000 | tip Reynolds floor |
 | `sm_band_lo` / `sm_band_hi` | 0.06 / 0.08 | target static-margin band |
+| `sm_floor_penalty` | 30 | hard cv-gate weight forcing `SM ≥ sm_band_lo`; `0` = soft objective only |
 | `thrust_z_offset` | 0.020 | thrust line above CG (m) |
 | `hinge_moment_max` | 1.2 | fatal servo torque (kg·cm) |
 | `roll_helix_min` | 0.05 | steady helix pb/2V floor (0 = disabled) |
