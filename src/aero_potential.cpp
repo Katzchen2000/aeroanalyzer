@@ -135,6 +135,9 @@ std::uint64_t geom_signature(const WingGeometry& w) {
     mix(w.le_sweep);   mix(w.washout);   mix(w.section.te_thick);
     for (double v : w.section.wu) mix(v);
     for (double v : w.section.wl) mix(v);
+    mix(w.section_tip.te_thick);
+    for (double v : w.section_tip.wu) mix(v);
+    for (double v : w.section_tip.wl) mix(v);
     mix(static_cast<double>(w.stations.size()));
     for (const auto& s : w.stations) { mix(s.y); mix(s.chord); mix(s.x_le); mix(s.twist); }
     return h;
@@ -291,10 +294,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     const double xflow_fac = cfg.getd("crossflow_factor", 1.15);
     const double Shalf  = 0.5 * S_ref;
 
-    std::vector<double> shape;
-    shape.reserve(w.section.wu.size() + w.section.wl.size());
-    shape.insert(shape.end(), w.section.wu.begin(), w.section.wu.end());
-    shape.insert(shape.end(), w.section.wl.begin(), w.section.wl.end());
+    std::vector<double> shape;  // rebuilt per station from the lofted section
 
     st.cl_local.assign(w.stations.size(), 0.0);
     double CDp_num  = 0.0;
@@ -320,7 +320,10 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
 
         double Re       = RHO * V * cosL * s.chord / MU;
         double cl_norm  = cl_i / (cosL * cosL);
-        viscous::Polar pol = surr.query(shape, cl_norm, Re, w.section.te_thick);
+        shape.clear();
+        shape.insert(shape.end(), s.af.wu.begin(), s.af.wu.end());
+        shape.insert(shape.end(), s.af.wl.begin(), s.af.wl.end());
+        viscous::Polar pol = surr.query(shape, cl_norm, Re, s.af.te_thick);
 
         // Crossflow penalty on outer span for swept leading edges
         double ramp = 0.0;
@@ -338,6 +341,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.CDp    = (Shalf > 0) ? CDp_num / Shalf : 0.0;
     st.CD     = st.CDi + st.CDp;
     st.tip_stall = tip_stall;
+    st.cn_da  = control::adverse_yaw_cn_da(w, mp, surr, st.cl_local, a_ref, cfg);
 
     // ---- Pitching moment about CG ----------------------------------------
     // CM = CM_0 (section camber) + CL·(x_cg − x_np)/mac + Cm_δe + Cm_thrust

@@ -41,6 +41,11 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
     Config cfgRes = cfg, cfgJac = cfg;
     if (freezeWake) { cfgRes.set("panel_freeze_wake", "1"); cfgJac.set("panel_freeze_wake", "1"); }
     else if (freezeJac) { cfgJac.set("panel_freeze_wake", "1"); }
+    // The relaxed-wake pass tilts (and rebuilds) the wake; running it inside the
+    // frozen-wake Newton iterations would corrupt the cached factorization. Strip
+    // it here and apply exactly one pass after convergence (below).
+    cfgRes.set("panel_relaxed_wake", "0");
+    cfgJac.set("panel_relaxed_wake", "0");
 
     AeroState st = potential::solve(w, mp, surr, cfgRes, alpha, delta);
     const int max_iter = 50;
@@ -76,6 +81,17 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
     st = potential::solve(w, mp, surr, cfgRes, alpha, delta);
     st.trimmed = st.trimmed ||
         (std::fabs(st.CL - CL_req) < 1e-5 && std::fabs(st.CM) < 1e-5);
+
+    // ---- One relaxed-wake pass at the trimmed point (opt-in; reporting only) --
+    // Refines induced drag with a free-aligned wake. Panel model only.
+    if (cfg.geti("panel_relaxed_wake", 0) != 0 &&
+        cfg.gets("aero_model", "panel") == "panel") {
+        Config cfgRx = cfg;
+        cfgRx.set("panel_relaxed_wake", "1");
+        cfgRx.set("panel_freeze_wake", "0");   // live wake for the realignment
+        AeroState rx = potential::solve(w, mp, surr, cfgRx, alpha, delta);
+        st.e = rx.e; st.CDi = rx.CDi; st.CD = rx.CD;
+    }
 
     // ---- High-alpha capped solve: physical NP migration and tip-stall (M5) -
     // Reuses the warm frozen-wake AIC (same geometry, one back-sub + strip loop).

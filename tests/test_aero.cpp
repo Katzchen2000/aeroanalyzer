@@ -606,6 +606,28 @@ TEST(cv_roll_gate) {
     CHECK(low_helix || (st2.roll_helix > st.roll_helix));
 }
 
+// Figure-8 guard (plan blindspot Tier 1): a section whose lower CST weights are
+// pushed above the upper surface self-intersects. The gate keys on interior
+// min-thickness going negative, and section_area_hat must NOT discount the
+// crossed region into negative/lower area (which rewarded the figure-8).
+TEST(crossed_section_guarded) {
+    Airfoil f;
+    f.wu = {0.20, 0.17, 0.14, 0.11};
+    f.wl = {0.20, 0.25, 0.30, 0.40};   // lower surface pushed above upper -> crosses
+    f.te_thick = 0.002;
+
+    // interior thickness goes negative -> constraint 12 would fire (cv>0)
+    double min_t = 1e9;
+    for (int i = 0; i < 60; ++i) {
+        double x = 0.5 * (1.0 - std::cos(PI * i / 59.0));
+        min_t = std::min(min_t, geom::cst_upper(f, x) - geom::cst_lower(f, x));
+    }
+    CHECK(min_t < 0.0);
+
+    // clamp keeps the crossed region from subtracting area
+    CHECK(massprops::section_area_hat(f) >= 0.0);
+}
+
 // Surrogate hull clamp flags out-of-range queries instead of extrapolating.
 TEST(surrogate_clamps) {
     Config cfg;
@@ -616,4 +638,46 @@ TEST(surrogate_clamps) {
     viscous::Polar ok = surr.query(shape, 0.3, 2.0e5);
     CHECK(!ok.clamped);
     CHECK(ok.cd > 0.0);
+}
+
+// Adverse-yaw derivative (constraint 15): a plain aileron (no differential) at a
+// positive lift coefficient produces Cn_da > 0 (yaw opposing the roll) from the
+// profile-drag asymmetry. Increasing the up/down differential reduces it.
+TEST(adverse_yaw_cn_da_sign_and_differential) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6"); cfg.set("panel_wake_chords", "20");
+    cfg.set("aileron_deflect_max_deg", "10");  // modest throw: stay in the drag bucket
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    w.washout = 0.0;            // tips carry positive lift across the aileron band
+    w.ail_span_frac = 0.5;
+    geom::loft(w, 20);
+    MassProps mp = massprops::compute(w, cfg);
+
+    Config c1 = cfg; c1.set("aileron_diff_ratio", "1");   // no differential
+    AeroState s1 = potential::solve(w, mp, surr, c1, 4.0 * DEG2RAD, 0.0);
+    CHECK(s1.cn_da > 0.0);
+
+    Config c8 = cfg; c8.set("aileron_diff_ratio", "8");   // strong differential
+    AeroState s8 = potential::solve(w, mp, surr, c8, 4.0 * DEG2RAD, 0.0);
+    CHECK(s8.cn_da < s1.cn_da);
+}
+
+// Relaxed-wake pass refines induced drag but must stay within a small fraction
+// of the frozen-wake CDi (the frozen wake is already a good approximation).
+TEST(relaxed_wake_refines_cdi) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    MassProps mp = massprops::compute(w, cfg);
+
+    AeroState froze = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    Config cr = cfg;
+    cr.set("panel_relaxed_wake", "1");
+    cr.set("panel_wake_relax_steps", "3");
+    AeroState relax = potential::solve(w, mp, surr, cr, 4.0 * DEG2RAD, 0.0);
+
+    CHECK(relax.CDi > 0.0);
+    CHECK(std::fabs(relax.CDi - froze.CDi) / froze.CDi < 0.05);
 }

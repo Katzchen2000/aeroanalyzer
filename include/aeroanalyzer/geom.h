@@ -17,12 +17,14 @@ enum Gene {
     G_SWEEP,      // leading-edge sweep, deg
     G_WASHOUT,    // tip twist, deg (negative = washout)
     G_BATTERY,    // battery-box CG x, m
-    G_WU0, G_WU1, G_WU2, G_WU3,   // upper CST weights
-    G_WL0, G_WL1, G_WL2, G_WL3,   // lower CST weights
+    G_WU0, G_WU1, G_WU2, G_WU3,   // root upper CST weights
+    G_WL0, G_WL1, G_WL2, G_WL3,   // root lower CST weights
     G_TE,         // trailing-edge thickness, fraction of chord
     G_MODE,       // <0.5 Elevon, else Split
     G_CS_CHORD,   // control-surface chord fraction [0.15, 0.35]
     G_AIL_SPAN,   // aileron inboard edge, fraction of semi-span [0.40, 0.80]
+    G_TIP_WU0, G_TIP_WU1, G_TIP_WU2, G_TIP_WU3,   // tip upper CST weights
+    G_TIP_WL0, G_TIP_WL1, G_TIP_WL2, G_TIP_WL3,   // tip lower CST weights
     N_GENES
 };
 

@@ -44,6 +44,7 @@ struct Station {
     double z      = 0.0;   // dihedral offset, m
     double twist  = 0.0;   // local incidence (washout), rad
     double width  = 0.0;   // spanwise strip width for integration, m
+    Airfoil af;            // lofted section shape at this station (root->tip blend)
 };
 
 // Decoded design: a physical half-wing (mirror assumed).
@@ -53,7 +54,8 @@ struct WingGeometry {
     double tip_chord  = 0.13;  // m
     double le_sweep   = 0.0;   // rad (leading-edge sweep)
     double washout    = 0.0;   // rad (tip twist, negative = washout)
-    Airfoil section;           // constant section shape (scaled per station)
+    Airfoil section;           // root section shape (scaled per station)
+    Airfoil section_tip;       // tip section shape; loft() blends root->tip
     ControlMode mode = ControlMode::Elevon;
     double battery_x     = 0.05;  // battery-box CG x location, m (CG trim handle)
     double cs_chord_frac = 0.25;  // control-surface chord fraction [0.15, 0.35]
@@ -88,6 +90,7 @@ struct AeroState {
     double cl_da = 0.0;          // roll control derivative, per rad
     double cl_p  = 0.0;          // roll damping derivative, per (pb/2V)
     double roll_helix = 0.0;     // steady roll helix pb/2V at max diff. deflection
+    double cn_da = 0.0;          // aileron yaw derivative; >0 = adverse yaw
     std::vector<double> cl_local;  // per-station local lift coefficient
     bool tip_stall = false;
     bool trimmed = false;     // did the trim solve converge?

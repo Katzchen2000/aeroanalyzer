@@ -137,5 +137,43 @@ Derivs compute(const WingGeometry& w, const MassProps& mp,
     return d;
 }
 
+double adverse_yaw_cn_da(const WingGeometry& w, const MassProps& mp,
+                         const viscous::Surrogate& surr,
+                         const std::vector<double>& cl_local,
+                         double a, const Config& cfg) {
+    const double S = mp.S_ref > 0 ? mp.S_ref : 1.0;
+    const double b = mp.b_full > 0 ? mp.b_full : 2.0 * w.semi_span;
+    const double V = cfg.getd("v_cruise", V_CRUISE);
+    const double cosL = std::cos(w.le_sweep);
+    const double tau  = flap_tau(w.cs_chord_frac);
+    const double da_max = cfg.getd("aileron_deflect_max_deg", 20.0) * DEG2RAD;
+    const double diff   = std::max(1.0, cfg.getd("aileron_diff_ratio", 4.0));
+    const double d_down = da_max / diff;   // down-going aileron (differential: smaller)
+    const double d_up   = da_max;          // up-going aileron (larger throw)
+    const double ail_t  = w.ail_span_frac;
+
+    // num = integral of (cd_down - cd_up) * chord * y * dy over the aileron band.
+    double num = 0.0;
+    std::vector<double> shape;
+    for (std::size_t i = 0; i < w.stations.size(); ++i) {
+        const Station& s = w.stations[i];
+        double t = (w.semi_span > 0) ? s.y / w.semi_span : 0.0;
+        if (t < ail_t) continue;
+        double cl_base = (i < cl_local.size()) ? cl_local[i] : 0.0;
+        double dcl_down = a * tau * d_down;
+        double dcl_up   = a * tau * d_up;
+        shape.clear();
+        shape.insert(shape.end(), s.af.wu.begin(), s.af.wu.end());
+        shape.insert(shape.end(), s.af.wl.begin(), s.af.wl.end());
+        double Re = RHO * V * cosL * s.chord / MU;
+        double cd_down = surr.query(shape, (cl_base + dcl_down) / (cosL * cosL),
+                                    Re, s.af.te_thick).cd;
+        double cd_up   = surr.query(shape, (cl_base - dcl_up) / (cosL * cosL),
+                                    Re, s.af.te_thick).cd;
+        num += (cd_down - cd_up) * s.chord * s.y * s.width;
+    }
+    return (2.0 / (S * b)) * num;
+}
+
 }  // namespace control
 }  // namespace aero

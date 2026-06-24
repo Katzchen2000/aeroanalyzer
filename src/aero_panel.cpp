@@ -203,9 +203,9 @@ Mesh build_mesh(const WingGeometry& w, int nc, bool half_cosine) {
             const Station& B = full[sp + 1];
             for (int j = 0; j < nc; ++j) {
                 double x0 = xi[j], x1 = xi[j + 1];
-                auto ord = [&](const Station& /*S*/, double x) {
-                    return surf ? geom::cst_upper(w.section, x)
-                                : geom::cst_lower(w.section, x);
+                auto ord = [&](const Station& S, double x) {
+                    return surf ? geom::cst_upper(S.af, x)
+                                : geom::cst_lower(S.af, x);
                 };
                 // Four corners of the panel.
                 Vec3 pA0 = section_point(A, x0, ord(A, x0));
@@ -221,8 +221,8 @@ Mesh build_mesh(const WingGeometry& w, int nc, bool half_cosine) {
 
                 // Outward reference: from the camber line toward this panel.
                 double xm = 0.5 * (x0 + x1);
-                double camb = 0.5 * (geom::cst_upper(w.section, xm) +
-                                     geom::cst_lower(w.section, xm));
+                double camb = 0.5 * (geom::cst_upper(A.af, xm) +
+                                     geom::cst_lower(A.af, xm));
                 Vec3 inner = section_point(A, xm, camb);
                 Vec3 outward = cen - inner;
 
@@ -318,6 +318,9 @@ std::uint64_t geom_sig_panel(const WingGeometry& w, int nc, bool half_cosine) {
     mix(w.le_sweep); mix(w.washout); mix(w.section.te_thick);
     for (double v : w.section.wu) mix(v);
     for (double v : w.section.wl) mix(v);
+    mix(w.section_tip.te_thick);
+    for (double v : w.section_tip.wu) mix(v);
+    for (double v : w.section_tip.wl) mix(v);
     mix(static_cast<double>(nc));
     mix(half_cosine ? 1.0 : 0.0);
     mix(static_cast<double>(w.stations.size()));
@@ -687,6 +690,27 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
         }
         e_panel = span_efficiency(gamma);
     }
+
+    // Optional relaxed-wake pass: re-align the trailing wake with the local
+    // downwash (induced angle) and re-solve, capturing the dominant free-wake
+    // effect on CDi. Off by default; the reporting path enables it for the
+    // incumbent only. ponytail: first-order wake tilt, not full Biot-Savart
+    // rollup -- upgrade to multi-segment convection only if sub-0.1% CDi matters.
+    if (cfg.geti("panel_relaxed_wake", 0) != 0 && t_sys.valid && t_sys.N > 0 && AR > 0) {
+        int nc = cfg.geti("panel_chordwise", 10);
+        bool half = half_cosine_spacing(cfg);
+        double wlen = cfg.getd("panel_wake_chords", 20.0) * w.root_chord;
+        int steps = std::max(1, cfg.geti("panel_wake_relax_steps", 3));
+        for (int it = 0; it < steps && e_panel > 1e-6; ++it) {
+            double a_ind = panel_CL / (PI * e_panel * AR);   // induced angle, rad
+            Vec3 wdir(std::cos(alpha - a_ind), 0.0, std::sin(alpha - a_ind));
+            build_system(w, nc, wlen, wdir, half);
+            double fl = 0.0;
+            Eigen::VectorXd mu = solve_mu(Vinf, fl);
+            panel_CL = trefftz_CL(mu, gmax, &gamma);
+            e_panel = span_efficiency(gamma);
+        }
+    }
     st.e = e_panel;
     st.x_np = x_np;
     st.static_margin = (mp.mac > 0) ? (x_np - mp.x_cg) / mp.mac : 0.0;
@@ -705,9 +729,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     const double xflow_fac = cfg.getd("crossflow_factor", 1.15);
     const double Shalf = 0.5 * (mp.S_ref > 0 ? mp.S_ref : 1.0);
 
-    std::vector<double> shape;
-    shape.insert(shape.end(), w.section.wu.begin(), w.section.wu.end());
-    shape.insert(shape.end(), w.section.wl.begin(), w.section.wl.end());
+    std::vector<double> shape;  // rebuilt per strip from the lofted sections
 
     st.cl_local.assign(w.stations.size(), 0.0);
     double CDp_num = 0.0;
@@ -733,7 +755,16 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
 
         double Re      = RHO * V * cosL * chord / MU;
         double cl_norm = cl_i / (cosL * cosL);
-        viscous::Polar pol = surr.query(shape, cl_norm, Re, w.section.te_thick);
+        // strip section = mean of the two bounding lofted stations
+        const Airfoil& afA = w.stations[sp].af;
+        const Airfoil& afB = w.stations[sp + 1].af;
+        shape.clear();
+        for (std::size_t j = 0; j < afA.wu.size(); ++j)
+            shape.push_back(0.5 * (afA.wu[j] + afB.wu[j]));
+        for (std::size_t j = 0; j < afA.wl.size(); ++j)
+            shape.push_back(0.5 * (afA.wl[j] + afB.wl[j]));
+        double te_strip = 0.5 * (afA.te_thick + afB.te_thick);
+        viscous::Polar pol = surr.query(shape, cl_norm, Re, te_strip);
 
         // Accumulate capped-load centroid for the post-stall NP (M5 high-alpha pass)
         if (post_stall_cap && chord > 0) {
@@ -764,6 +795,9 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.CDp = (Shalf > 0) ? CDp_num / Shalf : 0.0;
     st.CD  = st.CDi + st.CDp;
     st.tip_stall = tip_stall;
+    // adverse yaw only on the cruise solve; the high-alpha pass discards it.
+    if (!post_stall_cap)
+        st.cn_da = control::adverse_yaw_cn_da(w, mp, surr, st.cl_local, a_ref, cfg);
 
     // Post-stall cap override: replace x_np and tip_stall with capped-load results (M5)
     if (post_stall_cap) {

@@ -6,7 +6,9 @@
 #pragma once
 #include "aeroanalyzer/engine_core.h"
 #include "aeroanalyzer/massprops.h"
+#include "aeroanalyzer/aero_viscous.h"
 #include "aeroanalyzer/config.h"
+#include <vector>
 
 namespace aero {
 namespace control {
@@ -36,6 +38,16 @@ struct Derivs {
 //          motor_diameter is NOT read here — that lives in massprops).
 Derivs compute(const WingGeometry& w, const MassProps& mp,
                double a, double alpha, double delta_e, const Config& cfg);
+
+// Aileron yaw derivative Cn_da from profile-drag asymmetry across the aileron
+// band (down-going aileron carries more lift -> more drag -> yaw opposing the
+// roll). Returns >0 for adverse yaw. Needs the surrogate + per-station cl, so it
+// runs after the backend's viscous strip sweep, not inside compute().
+// a = 3-D lift-curve slope (shared with Cl_da); cl_local indexed by station.
+double adverse_yaw_cn_da(const WingGeometry& w, const MassProps& mp,
+                         const viscous::Surrogate& surr,
+                         const std::vector<double>& cl_local,
+                         double a, const Config& cfg);
 
 }  // namespace control
 }  // namespace aero

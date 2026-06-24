@@ -31,6 +31,15 @@ GenomeSpec default_genome() {
     set(G_MODE,     "mode",          0.0,   1.0);
     set(G_CS_CHORD, "cs_chord_frac", 0.15,  0.35);
     set(G_AIL_SPAN, "ail_span_frac", 0.40,  0.80);
+    // tip section mirrors the root bounds; loft() interpolates root->tip.
+    set(G_TIP_WU0, "tip_wu0", 0.10, 0.34);
+    set(G_TIP_WU1, "tip_wu1", 0.10, 0.34);
+    set(G_TIP_WU2, "tip_wu2", 0.08, 0.30);
+    set(G_TIP_WU3, "tip_wu3", 0.06, 0.26);
+    set(G_TIP_WL0, "tip_wl0", -0.22, 0.05);
+    set(G_TIP_WL1, "tip_wl1", -0.20, 0.08);
+    set(G_TIP_WL2, "tip_wl2", -0.15, 0.15);
+    set(G_TIP_WL3, "tip_wl3", -0.05, 0.20);
     return g;
 }
 
@@ -152,6 +161,9 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec) {
     w.section.wu = {clamp(G_WU0), clamp(G_WU1), clamp(G_WU2), clamp(G_WU3)};
     w.section.wl = {clamp(G_WL0), clamp(G_WL1), clamp(G_WL2), clamp(G_WL3)};
     w.section.te_thick = clamp(G_TE);
+    w.section_tip.wu = {clamp(G_TIP_WU0), clamp(G_TIP_WU1), clamp(G_TIP_WU2), clamp(G_TIP_WU3)};
+    w.section_tip.wl = {clamp(G_TIP_WL0), clamp(G_TIP_WL1), clamp(G_TIP_WL2), clamp(G_TIP_WL3)};
+    w.section_tip.te_thick = w.section.te_thick;  // evaluate() may override w/ te_thick_tip_frac
     w.mode           = (clamp(G_MODE) < 0.5) ? ControlMode::Elevon : ControlMode::Split;
     w.cs_chord_frac  = clamp(G_CS_CHORD);
     w.ail_span_frac  = clamp(G_AIL_SPAN);
@@ -161,19 +173,32 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec) {
 void loft(WingGeometry& w, int n) {
     if (n < 2) n = 2;
     w.stations.assign(n, Station{});
+    // Tip section blends to root when unset (most scratch/test callers only
+    // set w.section); decode() populates section_tip for the optimizer.
+    const Airfoil& root = w.section;
+    const Airfoil& tip  = w.section_tip.wu.empty() ? w.section : w.section_tip;
     std::vector<double> y(n);
     for (int i = 0; i < n; ++i) {
         double th = PI * i / (n - 1);
         y[i] = w.semi_span * 0.5 * (1.0 - std::cos(th));  // cluster root & tip
     }
     for (int i = 0; i < n; ++i) {
-        double t = y[i] / w.semi_span;                    // 0 root .. 1 tip
+        double t = (w.semi_span > 0) ? y[i] / w.semi_span : 0.0;  // 0 root .. 1 tip
         Station s;
         s.y = y[i];
         s.chord = w.root_chord + (w.tip_chord - w.root_chord) * t;
         s.x_le  = y[i] * std::tan(w.le_sweep);            // sheared sweep
         s.twist = w.washout * t;
         s.z = 0.0;
+        // lofted section: linear blend of root/tip CST weights + TE thickness.
+        s.af.N1 = root.N1; s.af.N2 = root.N2;
+        s.af.wu.resize(root.wu.size());
+        s.af.wl.resize(root.wl.size());
+        for (std::size_t j = 0; j < root.wu.size(); ++j)
+            s.af.wu[j] = (1.0 - t) * root.wu[j] + t * tip.wu[j];
+        for (std::size_t j = 0; j < root.wl.size(); ++j)
+            s.af.wl[j] = (1.0 - t) * root.wl[j] + t * tip.wl[j];
+        s.af.te_thick = (1.0 - t) * root.te_thick + t * tip.te_thick;
         // strip width via midpoints (trapezoidal control volumes)
         double y_lo = (i == 0) ? y[0] : 0.5 * (y[i - 1] + y[i]);
         double y_hi = (i == n - 1) ? y[n - 1] : 0.5 * (y[i] + y[i + 1]);

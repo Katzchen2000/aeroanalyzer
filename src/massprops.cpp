@@ -12,7 +12,9 @@ double section_area_hat(const Airfoil& f) {
     for (int i = 0; i < N; ++i) {
         double th = PI * i / (N - 1);
         double x = 0.5 * (1.0 - std::cos(th));
-        double t = geom::cst_upper(f, x) - geom::cst_lower(f, x);
+        // clamp: a crossed (figure-8) section must not subtract area, else the
+        // mass objective rewards self-intersection (plan blindspot Tier 1B).
+        double t = std::max(0.0, geom::cst_upper(f, x) - geom::cst_lower(f, x));
         if (i > 0) area += 0.5 * (t + prev_t) * (x - prev_x);
         prev_t = t; prev_x = x;
     }
@@ -45,15 +47,14 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     const double infill_r = cfg.getd("infill_root", 0.10);
     const double infill_t = cfg.getd("infill_tip", 0.03);
 
-    const double A_hat = section_area_hat(w.section);      // chord=1 area
-    const double P_hat = section_perimeter_hat(w.section); // chord=1 perimeter
-
     // ---- structural mass + CG via spanwise trapezoidal accumulation ----
     double vol_half = 0.0;     // m^3 (one half)
     double struct_m = 0.0;     // kg (one half)
     double struct_mx = 0.0;    // kg*m
     for (const auto& s : w.stations) {
         double t = (w.semi_span > 0) ? s.y / w.semi_span : 0.0;
+        double A_hat = section_area_hat(s.af);       // chord=1 area, lofted section
+        double P_hat = section_perimeter_hat(s.af);  // chord=1 perimeter
         double infill = infill_r + (infill_t - infill_r) * t;     // gradient
         double enclosed = A_hat * s.chord * s.chord;              // m^2
         double shell = P_hat * s.chord * t_shell;                // m^2 (thin wall)
@@ -120,8 +121,8 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
         if (frac < 0.02 || frac > 0.98) {
             clear = -(r_spar);   // spar exits the section near LE/TE
         } else {
-            double half_t = 0.5 * (geom::cst_upper(w.section, frac)
-                                   - geom::cst_lower(w.section, frac)) * s.chord;
+            double half_t = 0.5 * (geom::cst_upper(s.af, frac)
+                                   - geom::cst_lower(s.af, frac)) * s.chord;
             clear = half_t - r_spar;
         }
         min_clear = std::min(min_clear, clear);
@@ -134,6 +135,9 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     // ponytail: battery-fit check omitted (plan names motor + avionics); add when
     //           battery box dimensions become a design variable.
 
+    // ponytail: motor (root) + avionics keep-outs use the root section; the
+    // lofted spanwise variation is second-order for these fixed-spot clearance
+    // checks. Use the lofted station section if avionics placement gets tuned.
     // Motor at root TE: check half-thickness at 80% chord >= motor radius.
     double motor_r   = 0.5 * cfg.getd("motor_diameter", 0.028);
     double half_t_mot = 0.5 * (geom::cst_upper(w.section, 0.80)

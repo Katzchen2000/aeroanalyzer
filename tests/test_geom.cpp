@@ -84,3 +84,37 @@ TEST(loft_spanwise) {
     CHECK_NEAR(w.stations.back().twist, -4.0 * DEG2RAD, 1e-9);
     CHECK(w.stations.back().x_le > w.stations.front().x_le);  // swept aft
 }
+
+// Variable-section genome: root + tip CST (4th order each) -> 24 genes, tip
+// bounds mirror the root bounds.
+TEST(genome_has_tip_section) {
+    CHECK(geom::N_GENES == 26);   // 18 base genes + 8 tip CST weights
+    geom::GenomeSpec spec = geom::default_genome();
+    CHECK((int)spec.size() == 26);
+    CHECK_NEAR(spec.lo[geom::G_TIP_WU0], spec.lo[geom::G_WU0], 1e-12);
+    CHECK_NEAR(spec.hi[geom::G_TIP_WL3], spec.hi[geom::G_WL3], 1e-12);
+}
+
+// loft() blends root->tip CST linearly in eta; endpoints reproduce the sections
+// exactly and the tip TE closes when section_tip.te_thick = 0.
+TEST(loft_blends_root_to_tip) {
+    WingGeometry w;
+    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
+    w.section.wu = {0.20, 0.17, 0.14, 0.11};
+    w.section.wl = {-0.12, -0.09, -0.02, 0.06};
+    w.section.te_thick = 0.006;
+    w.section_tip.wu = {0.10, 0.09, 0.08, 0.05};
+    w.section_tip.wl = {-0.06, -0.04, 0.00, 0.03};
+    w.section_tip.te_thick = 0.0;                 // closed tip
+    geom::loft(w, 21);
+    for (int j = 0; j < 4; ++j) {
+        CHECK_NEAR(w.stations.front().af.wu[j], w.section.wu[j], 1e-9);
+        CHECK_NEAR(w.stations.back().af.wu[j],  w.section_tip.wu[j], 1e-9);
+    }
+    CHECK_NEAR(w.stations.back().af.te_thick, 0.0, 1e-9);   // tip TE closed
+    const Station& s = w.stations[10];
+    double t = s.y / w.semi_span;
+    for (int j = 0; j < 4; ++j)
+        CHECK_NEAR(s.af.wu[j],
+                   (1.0 - t) * w.section.wu[j] + t * w.section_tip.wu[j], 1e-9);
+}
