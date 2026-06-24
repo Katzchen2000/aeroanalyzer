@@ -83,7 +83,8 @@ void widen_cst_bounds(geom::GenomeSpec& spec, const SeedSet& s, double margin) {
 }
 
 std::vector<std::vector<double>> build_seed_genomes(
-    const geom::GenomeSpec& spec, const SeedSet& s, unsigned rng_seed, int count) {
+    const geom::GenomeSpec& spec, const SeedSet& s, unsigned rng_seed, int count,
+    double cst_jitter) {
     std::vector<std::vector<double>> out;
     if (s.airfoils.empty() || count <= 0) return out;
     std::mt19937 g(rng_seed);
@@ -103,14 +104,22 @@ std::vector<std::vector<double>> build_seed_genomes(
         for (int gi = 0; gi < n; ++gi)
             x[gi] = spec.lo[gi] + u(g) * (spec.hi[gi] - spec.lo[gi]);  // explorer base
 
-        // overlay the seed airfoil's CST shape
+        // overlay the seed airfoil's CST shape; hybrids jitter it around the seed
+        // so the seeded half doesn't stack onto only |seeds| distinct airfoils.
         const Airfoil& af = s.airfoils[k % s.airfoils.size()];
-        for (int i = 0; i < 4 && i < (int)af.wu.size(); ++i) x[G_WU0 + i] = clampg(G_WU0 + i, af.wu[i]);
-        for (int i = 0; i < 4 && i < (int)af.wl.size(); ++i) x[G_WL0 + i] = clampg(G_WL0 + i, af.wl[i]);
-        x[G_TE] = clampg(G_TE, af.te_thick);
+        bool elite = (k < n_elite);
+        auto put = [&](int gi, double base) {
+            double v = base;
+            if (!elite && cst_jitter > 0.0)
+                v += cst_jitter * (spec.hi[gi] - spec.lo[gi]) * (u(g) - 0.5);
+            x[gi] = clampg(gi, v);
+        };
+        for (int i = 0; i < 4 && i < (int)af.wu.size(); ++i) put(G_WU0 + i, af.wu[i]);
+        for (int i = 0; i < 4 && i < (int)af.wl.size(); ++i) put(G_WL0 + i, af.wl[i]);
+        put(G_TE, af.te_thick);
 
         // elites: settle planform at mid-box; hybrids keep the random planform
-        if (k < n_elite)
+        if (elite)
             for (int gi : planform) x[gi] = 0.5 * (spec.lo[gi] + spec.hi[gi]);
 
         out.push_back(std::move(x));

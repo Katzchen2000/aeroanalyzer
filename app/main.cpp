@@ -64,8 +64,9 @@ int main(int argc, char** argv) {
     // Ancestry injection: ~50% of the initial population from seed airfoils
     // (elites + hybrids), the rest random explorers (plan §3).
     int n_seed = static_cast<int>(std::lround(0.5 * p.pop));
+    double cst_jitter = cfg.getd("cst_seed_jitter", 0.25);
     auto seed_genes = seeds::build_seed_genomes(eval.spec(), eval.seeds(),
-                                                p.seed, n_seed);
+                                                p.seed, n_seed, cst_jitter);
     opt.set_seeds(seed_genes);
     std::cout << "seeded " << seed_genes.size() << " genomes from "
               << eval.seeds().airfoils.size() << " airfoil(s)";

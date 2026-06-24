@@ -334,8 +334,14 @@ The GA is seeded from real airfoils, then morphs them via the CST genes:
 Each seed is fit to CST (4 upper + 4 lower weights). The CST gene bounds are **widened** by
 `cst_bound_margin` to contain every seed (so seeds aren't clipped **and** the GA's morph
 region matches the surrogate's trained hull). ~50% of the initial population is built from
-seeds — 10% elites (seed shape + mid-box planform), 40% hybrids (seed shape + random
+seeds — 10% elites (pure seed shape + mid-box planform), 40% hybrids (seed shape + random
 planform) — with the rest random explorers.
+
+The **hybrids jitter their airfoil genes** around the seed by `cst_seed_jitter` (a fraction
+of each CST gene's range; default 0.25). Without it, all ~50% of seeded genomes share only
+*as many distinct airfoil shapes as there are seeds* (3 by default), which starves the
+airfoil search and converges the CST genes prematurely. The elites stay pure as known-good
+anchors; set `cst_seed_jitter = 0` to recover the exact-seed behavior.
 
 ---
 
@@ -475,6 +481,7 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 | `seed_airfoils_dir` | `data/airfoils` | folder scanned for `*.dat` seeds |
 | `seed_naca` | `0012,2412,4412` | generated NACA 4-digit seeds |
 | `cst_bound_margin` | 0.04 | CST gene morph room widened around seeds |
+| `cst_seed_jitter` | 0.25 | spread hybrids' CST genes around the seed (fraction of each gene's range); `0` = every seeded genome shares its seed's exact airfoil |
 | `mass_motor` | 0.060 | motor mass (kg), at Y=0 TE keep-out |
 | `mass_battery` | 0.210 | battery mass (kg), X-shiftable |
 | `mass_servo_each` | 0.012 | per-servo mass (kg) |
