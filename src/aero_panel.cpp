@@ -11,6 +11,7 @@
 // minus the off-plane solid-angle correction.
 
 #include "aeroanalyzer/aero_panel.h"
+#include "aeroanalyzer/control.h"
 #include "aeroanalyzer/geom.h"
 #include "aeroanalyzer/aero_potential.h"
 #include <Eigen/Dense>
@@ -576,38 +577,6 @@ double span_efficiency(const std::vector<double>& gamma) {
 
 // ---- Pitch-control derivatives (linear flap heuristic; mesh is undeflected,
 //      same model as the VLM path so trim/delta_e behave identically) --------
-struct PitchControl { double CLde, Cmde, Sf, cf_chord, x_cp; };
-
-double flap_tau(double cf_ratio) {
-    double tf = std::acos(2.0 * cf_ratio - 1.0);
-    return 1.0 - (tf - std::sin(tf)) / PI;
-}
-
-PitchControl pitch_control(const WingGeometry& w, const MassProps& mp, double a) {
-    const double y0 = 0.20, y1 = 0.50, cf_ratio = 0.30;
-    double tau = flap_tau(cf_ratio);
-    double Sf_half = 0.0, arm_num = 0.0, cfc = 0.0, n = 0.0;
-    for (const auto& s : w.stations) {
-        double t = (w.semi_span > 0) ? s.y / w.semi_span : 0.0;
-        if (t < y0 || t > y1) continue;
-        Sf_half += cf_ratio * s.chord * s.width;
-        double xcp = s.x_le + (1.0 - 0.5 * cf_ratio) * s.chord;
-        arm_num += xcp * (cf_ratio * s.chord * s.width);
-        cfc += cf_ratio * s.chord;
-        n += 1.0;
-    }
-    PitchControl pc{};
-    double Sf = 2.0 * Sf_half;
-    pc.Sf = Sf;
-    pc.cf_chord = (n > 0) ? cfc / n : cf_ratio * w.root_chord;
-    pc.x_cp = (Sf_half > 0) ? arm_num / Sf_half : w.root_chord;
-    double CLde = a * tau * (mp.S_ref > 0 ? Sf / mp.S_ref : 0.0);
-    pc.CLde = CLde;
-    double arm = (mp.mac > 0) ? (pc.x_cp - mp.x_cg) / mp.mac : 0.0;
-    pc.Cmde = -CLde * arm;
-    return pc;
-}
-
 }  // namespace
 
 PanelSolveStats panel_solve_debug(const WingGeometry& w, const Config& cfg,
@@ -677,7 +646,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     const double taper = (w.root_chord > 0) ? w.tip_chord / w.root_chord : 1.0;
     const double e_ref = potential::oswald_e(AR, taper);
     const double a_ref = potential::lift_curve_slope_3d(ta.cl_alpha, AR, e_ref);
-    PitchControl pc = pitch_control(w, mp, a_ref);
+    control::Derivs pc = control::compute(w, mp, a_ref, alpha, delta_e, cfg);
 
     // ---- Morino panel solve for the doublet distribution ----------------
     ensure_system(w, cfg, alpha);
@@ -744,6 +713,13 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     double CDp_num = 0.0;
     bool tip_stall = false;
 
+    // Post-stall cap (M5): gate on cfg flag; accumulates capped-load centroid for x_np_high
+    // ponytail: flag set by stability::trim() high-alpha pass only; zero cost on normal cruise solve
+    bool post_stall_cap = cfg.geti("post_stall_cap", 0) != 0;
+    double sumL_cap = 0.0, sumLx_cap = 0.0, sumLabs_cap = 0.0;
+    bool root_capped = false, tip_capped = false;
+    double xqc_cap_lo = 1e300, xqc_cap_hi = -1e300;
+
     // Strips ARE the half-wing strips (root..tip), one per [station i, i+1].
     int nstrip = m.n_strips;
     int nh = static_cast<int>(w.stations.size());
@@ -759,6 +735,22 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
         double cl_norm = cl_i / (cosL * cosL);
         viscous::Polar pol = surr.query(shape, cl_norm, Re, w.section.te_thick);
 
+        // Accumulate capped-load centroid for the post-stall NP (M5 high-alpha pass)
+        if (post_stall_cap && chord > 0) {
+            double cl_cap = std::min(cl_norm, pol.cl_max);
+            bool capped = (cl_norm > pol.cl_max && cl_i > 0.0);
+            double L_cap = cl_cap * (cosL * cosL) * chord * dy;
+            sumL_cap    += L_cap;
+            sumLx_cap   += L_cap * m.strip_xqc[sp];
+            sumLabs_cap += std::fabs(L_cap);
+            xqc_cap_lo = std::min(xqc_cap_lo, m.strip_xqc[sp]);
+            xqc_cap_hi = std::max(xqc_cap_hi, m.strip_xqc[sp]);
+            if (capped) {
+                if (t < 0.4) root_capped = true;
+                if (t > 0.6) tip_capped  = true;
+            }
+        }
+
         double ramp = 0.0;
         if (sweep_deg > xflow_deg - 3.0) {
             double u = (sweep_deg - (xflow_deg - 3.0)) / 6.0;
@@ -773,6 +765,20 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.CD  = st.CDi + st.CDp;
     st.tip_stall = tip_stall;
 
+    // Post-stall cap override: replace x_np and tip_stall with capped-load results (M5)
+    if (post_stall_cap) {
+        // Same guard as the Gamma-weighted NP block: require non-trivial net load
+        if (sumLabs_cap > 1e-12 && std::fabs(sumL_cap) > 1e-3 * sumLabs_cap) {
+            double xnp_cap = sumLx_cap / sumL_cap;
+            if (xqc_cap_hi >= xqc_cap_lo)
+                xnp_cap = std::min(xqc_cap_hi, std::max(xqc_cap_lo, xnp_cap));
+            st.x_np = xnp_cap;
+            st.static_margin = (mp.mac > 0) ? (xnp_cap - mp.x_cg) / mp.mac : 0.0;
+        }
+        // ponytail: tips-before-root is the pitch-up stall precursor; both capped = symmetric, benign
+        st.tip_stall = tip_capped && !root_capped;
+    }
+
     // ---- Pitching moment about CG ---------------------------------------
     double Cm0   = ta.cm_ac;
     double Cm_cl = st.CL * ((mp.x_cg - x_np) / (mp.mac > 0 ? mp.mac : 1.0));
@@ -784,15 +790,17 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     double Cm_thr = (denom > 0) ? (T * zt) / denom : 0.0;
     st.CM = Cm0 + Cm_cl + Cm_de - Cm_thr;
 
-    // ---- Hinge moment + high-alpha NP migration (same heuristics) -------
-    double Ch   = 0.45 * std::fabs(delta_e) + 0.05 * std::fabs(alpha);
-    double H_Nm = Ch * q * pc.Sf * pc.cf_chord;
-    st.hinge_moment = H_Nm * (100.0 / GRAV);
+    // ---- Hinge moment (Glauert thin-airfoil, worst-case pitch+roll) -----
+    st.hinge_moment = pc.hinge_moment;
 
-    double tip_unload     = 0.12 * std::sin(w.le_sweep);
-    double washout_relief = std::max(0.0, -w.washout) * 3.0;
-    double fwd = std::max(0.0, tip_unload - washout_relief);
-    st.x_np_high = x_np - fwd * (mp.mac > 0 ? mp.mac : 0.0);
+    // ---- Roll control / damping / helix (M6) ----------------------------
+    st.cl_da      = pc.Cl_da;
+    st.cl_p       = pc.Cl_p;
+    st.roll_helix = pc.roll_helix;
+
+    // x_np_high: cruise-NP fallback; stability::trim() overwrites this via a
+    // high-alpha capped solve (M5) for the panel model.
+    st.x_np_high = st.x_np;
 
     return st;
 }

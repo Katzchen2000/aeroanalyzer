@@ -37,10 +37,12 @@ Write-Host "Using: $gpp" -ForegroundColor DarkGray
 $eigen = "C:\Users\kadan\OneDrive\c++ libraries\eigen-5.0.0"
 
 # ---- common compile flags (NO -ffast-math: keeps NaN/Inf watchdogs alive) ----
-# EIGEN_DONT_PARALLELIZE: Eigen's per-thread VLM solves run inside the OpenMP GA
-# loop; let OpenMP own the parallelism (avoid nested oversubscription).
-$common = @('-std=c++17','-O2','-fno-math-errno','-fopenmp',
-            '-DEIGEN_DONT_PARALLELIZE',
+# -march=native: enables AVX2/FMA on the Eigen matrix solves and NeuralFoil passes.
+# -DNDEBUG/-DEIGEN_NO_DEBUG: strips Eigen bounds checks (significant in tight loops).
+# EIGEN_DONT_PARALLELIZE: Eigen's per-thread solves run inside the OpenMP GA loop;
+# let OpenMP own the parallelism (avoid nested oversubscription).
+$common = @('-std=c++17','-O3','-march=native','-fno-math-errno','-funroll-loops','-fopenmp',
+            '-DNDEBUG','-DEIGEN_NO_DEBUG','-DEIGEN_DONT_PARALLELIZE',
             '-static-libgcc','-static-libstdc++',
             '-I', (Join-Path $root 'include'))
 if (Test-Path (Join-Path $eigen 'Eigen\Dense')) {
@@ -48,7 +50,6 @@ if (Test-Path (Join-Path $eigen 'Eigen\Dense')) {
 } else {
   Write-Error "Eigen not found at '$eigen' (Eigen/Dense missing). Fix the path in build_mingw.ps1."
 }
-if ($Native) { $common += '-march=native' }
 
 $srcs = (Get-ChildItem (Join-Path $root 'src') -Filter *.cpp).FullName
 
@@ -62,6 +63,12 @@ function Build([string[]]$extra, [string]$outName, [string]$label) {
 
 # ---- application ----
 Build @((Join-Path $root 'app\main.cpp')) "aeroanalyzer.exe" "Building aeroanalyzer.exe"
+
+# ---- bundle OpenMP/pthread DLLs so the exe runs outside MSYS2 PATH ----
+foreach ($dll in @('libgomp-1.dll','libwinpthread-1.dll')) {
+  $src = Join-Path $mingwBin $dll
+  if (Test-Path $src) { Copy-Item $src $build -Force }
+}
 
 # ---- tests ----
 if ($Test) {

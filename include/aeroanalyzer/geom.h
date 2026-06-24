@@ -21,6 +21,8 @@ enum Gene {
     G_WL0, G_WL1, G_WL2, G_WL3,   // lower CST weights
     G_TE,         // trailing-edge thickness, fraction of chord
     G_MODE,       // <0.5 Elevon, else Split
+    G_CS_CHORD,   // control-surface chord fraction [0.15, 0.35]
+    G_AIL_SPAN,   // aileron inboard edge, fraction of semi-span [0.40, 0.80]
     N_GENES
 };
 

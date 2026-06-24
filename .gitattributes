@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Neural-net weight binaries: never apply text/EOL conversion. Without this,
+# autocrlf would treat NUL-free .bin files as text and corrupt the float32 data
+# (LF<->CRLF smudge) on checkout/clone.
+*.bin binary

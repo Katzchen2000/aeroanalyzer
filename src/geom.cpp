@@ -27,8 +27,10 @@ GenomeSpec default_genome() {
     set(G_WL1, "wl1", -0.20, 0.08);
     set(G_WL2, "wl2", -0.15, 0.15);
     set(G_WL3, "wl3", -0.05, 0.20);   // aft lower weight drives reflex
-    set(G_TE,   "te_frac",  0.002, 0.010);
-    set(G_MODE, "mode",     0.0,   1.0);
+    set(G_TE,       "te_frac",       0.002, 0.010);
+    set(G_MODE,     "mode",          0.0,   1.0);
+    set(G_CS_CHORD, "cs_chord_frac", 0.15,  0.35);
+    set(G_AIL_SPAN, "ail_span_frac", 0.40,  0.80);
     return g;
 }
 
@@ -150,7 +152,9 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec) {
     w.section.wu = {clamp(G_WU0), clamp(G_WU1), clamp(G_WU2), clamp(G_WU3)};
     w.section.wl = {clamp(G_WL0), clamp(G_WL1), clamp(G_WL2), clamp(G_WL3)};
     w.section.te_thick = clamp(G_TE);
-    w.mode = (clamp(G_MODE) < 0.5) ? ControlMode::Elevon : ControlMode::Split;
+    w.mode           = (clamp(G_MODE) < 0.5) ? ControlMode::Elevon : ControlMode::Split;
+    w.cs_chord_frac  = clamp(G_CS_CHORD);
+    w.ail_span_frac  = clamp(G_AIL_SPAN);
     return w;
 }
 

@@ -91,7 +91,8 @@ std::vector<std::vector<double>> build_seed_genomes(
     const int n = static_cast<int>(spec.size());
     const int n_elite = std::max(1, count / 5);
     using namespace geom;
-    const int planform[] = {G_ROOT, G_TAPER, G_SEMISPAN, G_SWEEP, G_WASHOUT, G_BATTERY};
+    const int planform[] = {G_ROOT, G_TAPER, G_SEMISPAN, G_SWEEP, G_WASHOUT,
+                            G_BATTERY, G_CS_CHORD, G_AIL_SPAN};
 
     auto clampg = [&](int gi, double v) {
         return std::min(spec.hi[gi], std::max(spec.lo[gi], v));

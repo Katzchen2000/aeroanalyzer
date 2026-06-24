@@ -55,7 +55,9 @@ struct WingGeometry {
     double washout    = 0.0;   // rad (tip twist, negative = washout)
     Airfoil section;           // constant section shape (scaled per station)
     ControlMode mode = ControlMode::Elevon;
-    double battery_x  = 0.05;  // battery-box CG x location, m (CG trim handle)
+    double battery_x     = 0.05;  // battery-box CG x location, m (CG trim handle)
+    double cs_chord_frac = 0.25;  // control-surface chord fraction [0.15, 0.35]
+    double ail_span_frac = 0.60;  // aileron inboard edge, fraction of semi-span [0.40, 0.80]
     std::vector<Station> stations;  // filled by geom::loft()
 };
 
@@ -70,6 +72,7 @@ struct MassProps {
     double AR       = 0.0;  // aspect ratio
     double volume   = 0.0;  // structural volume (shell+infill), m^3
     double spar_clearance = 1.0;  // min spar-to-OML clearance, m (neg = breach)
+    double hw_clearance   = 1.0;  // min hardware-to-OML clearance, m (neg = breach)
 };
 
 // ---- aerodynamic operating-point result ---------------------------------
@@ -81,7 +84,10 @@ struct AeroState {
     double x_np = 0.0;        // neutral point, m
     double x_np_high = 0.0;   // neutral point re-evaluated at high alpha, m
     double static_margin = 0.0;  // (x_np - x_cg)/MAC
-    double hinge_moment = 0.0;   // required servo torque, kg-cm
+    double hinge_moment = 0.0;   // worst-case servo torque, kg-cm (pitch+roll)
+    double cl_da = 0.0;          // roll control derivative, per rad
+    double cl_p  = 0.0;          // roll damping derivative, per (pb/2V)
+    double roll_helix = 0.0;     // steady roll helix pb/2V at max diff. deflection
     std::vector<double> cl_local;  // per-station local lift coefficient
     bool tip_stall = false;
     bool trimmed = false;     // did the trim solve converge?

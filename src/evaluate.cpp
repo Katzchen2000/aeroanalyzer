@@ -73,6 +73,18 @@ EvalResult Evaluator::run(const std::vector<double>& genes) const {
     // (8) basic static stability floor (NP aft of CG at cruise)
     if (r.aero.static_margin < 0.0) cv += 25.0 * (-r.aero.static_margin);
 
+    // (9) roll authority: steady helix pb/2V must meet minimum (M6)
+    double helix_min = cfg_.getd("roll_helix_min", 0.05);
+    if (helix_min > 0.0 && r.aero.roll_helix < helix_min)
+        cv += 30.0 * (helix_min - r.aero.roll_helix) / helix_min;
+
+    // (10) hardware keep-out: motor + avionics must fit in section (M6)
+    if (r.mp.hw_clearance < 0.0) {
+        double hw_ref = cfg_.getd("motor_diameter", 0.028) * 0.5;
+        if (hw_ref <= 0.0) hw_ref = 0.014;
+        cv += 30.0 * (-r.mp.hw_clearance) / hw_ref;
+    }
+
     r.cv = cv;
     return r;
 }

@@ -24,6 +24,7 @@
 
 #include "aeroanalyzer/aero_potential.h"
 #include "aeroanalyzer/aero_panel.h"
+#include "aeroanalyzer/control.h"
 #include "aeroanalyzer/geom.h"
 #include <Eigen/Dense>
 #include <string>
@@ -59,40 +60,7 @@ double wing_ac_x(const WingGeometry& w) {
     return (den > 0) ? num / den : 0.25 * w.root_chord;
 }
 
-// ---- Pitch-control derivatives (linear heuristic, plan §5) ---------------
 namespace {
-struct PitchControl { double CLde, Cmde, Sf, cf_chord, x_cp; };
-
-double flap_tau(double cf_ratio) {
-    double tf = std::acos(2.0 * cf_ratio - 1.0);
-    return 1.0 - (tf - std::sin(tf)) / PI;
-}
-
-PitchControl pitch_control(const WingGeometry& w, const MassProps& mp, double a) {
-    const double y0 = 0.20, y1 = 0.50;
-    const double cf_ratio = 0.30;
-    double tau = flap_tau(cf_ratio);
-    double Sf_half = 0.0, arm_num = 0.0, cfc = 0.0, n = 0.0;
-    for (const auto& s : w.stations) {
-        double t = (w.semi_span > 0) ? s.y / w.semi_span : 0.0;
-        if (t < y0 || t > y1) continue;
-        Sf_half += cf_ratio * s.chord * s.width;
-        double xcp = s.x_le + (1.0 - 0.5 * cf_ratio) * s.chord;
-        arm_num += xcp * (cf_ratio * s.chord * s.width);
-        cfc += cf_ratio * s.chord;
-        n += 1.0;
-    }
-    PitchControl pc{};
-    double Sf = 2.0 * Sf_half;
-    pc.Sf = Sf;
-    pc.cf_chord = (n > 0) ? cfc / n : cf_ratio * w.root_chord;
-    pc.x_cp = (Sf_half > 0) ? arm_num / Sf_half : w.root_chord;
-    double CLde = a * tau * (mp.S_ref > 0 ? Sf / mp.S_ref : 0.0);
-    pc.CLde = CLde;
-    double arm = (mp.mac > 0) ? (pc.x_cp - mp.x_cg) / mp.mac : 0.0;
-    pc.Cmde = -CLde * arm;
-    return pc;
-}
 
 // ---- VLM influence kernel ------------------------------------------------
 //
@@ -262,7 +230,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.e = e_ref;
     const double a_ref = lift_curve_slope_3d(ta.cl_alpha, AR, e_ref);
 
-    PitchControl pc = pitch_control(w, mp, a_ref);
+    control::Derivs pc = control::compute(w, mp, a_ref, alpha, delta_e, cfg);
 
     // ---- Build / reuse VLM factorisation --------------------------------
     // Reuse only when the cached factorisation belongs to this exact geometry
@@ -385,13 +353,16 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
 
     st.CM = Cm0 + Cm_cl + Cm_de - Cm_thr;
 
-    // ---- Hinge moment (servo torque reference estimate) -----------------
-    double Ch   = 0.45 * std::fabs(delta_e) + 0.05 * std::fabs(alpha);
-    double H_Nm = Ch * q * pc.Sf * pc.cf_chord;
-    st.hinge_moment = H_Nm * (100.0 / GRAV);
+    // ---- Hinge moment (Glauert thin-airfoil, worst-case pitch+roll) -----
+    st.hinge_moment = pc.hinge_moment;
 
-    // ---- High-alpha NP migration heuristic (tip unloading) --------------
-    double tip_unload    = 0.12 * std::sin(w.le_sweep);
+    // ---- Roll control / damping / helix (M6) ----------------------------
+    st.cl_da      = pc.Cl_da;
+    st.cl_p       = pc.Cl_p;
+    st.roll_helix = pc.roll_helix;
+
+    // ---- High-alpha NP migration heuristic (VLM fallback; no strip cl_max) -
+    double tip_unload     = 0.12 * std::sin(w.le_sweep);
     double washout_relief = std::max(0.0, -w.washout) * 3.0;
     double fwd = std::max(0.0, tip_unload - washout_relief);
     st.x_np_high = x_np - fwd * (mp.mac > 0 ? mp.mac : 0.0);

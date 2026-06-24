@@ -76,6 +76,18 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
     st = potential::solve(w, mp, surr, cfgRes, alpha, delta);
     st.trimmed = st.trimmed ||
         (std::fabs(st.CL - CL_req) < 1e-5 && std::fabs(st.CM) < 1e-5);
+
+    // ---- High-alpha capped solve: physical NP migration and tip-stall (M5) -
+    // Reuses the warm frozen-wake AIC (same geometry, one back-sub + strip loop).
+    // Only for the panel model; VLM keeps the heuristic from solve() above.
+    if (cfg.gets("aero_model", "panel") == "panel") {
+        double aHi = cfg.getd("high_alpha_deg", 12.0) * DEG2RAD;
+        Config cfgHi = cfgRes;          // inherits panel_freeze_wake=1 when set
+        cfgHi.set("post_stall_cap", "1");
+        AeroState hi = potential::solve(w, mp, surr, cfgHi, aHi, delta);
+        st.x_np_high = hi.x_np;        // capped-load centroid at high alpha
+        st.tip_stall = hi.tip_stall;   // tips-before-root stall
+    }
     return st;
 }
 

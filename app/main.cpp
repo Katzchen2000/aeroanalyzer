@@ -28,7 +28,7 @@ void print_dash(const EngineDashboard& d) {
                   << " | best SMdev " << std::setprecision(4)
                   << d.best_sm.objectives[OBJ_SM];
     }
-    std::cout << "\n";
+    std::cout << "\n" << std::flush;
 }
 }  // namespace
 
@@ -87,8 +87,12 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories("out");
     std::ofstream csv("out/pareto.csv");
     csv << "idx,drag_N,mass_kg,sm_dev,static_margin,span_m,AR,root_c,tip_c,"
-           "sweep_deg,washout_deg,CL,CD,hinge_kgcm,mode\n";
+           "sweep_deg,washout_deg,CL,CD,hinge_kgcm,roll_helix,mode\n";
     csv << std::fixed << std::setprecision(5);
+
+    // Accumulate for summary (reuses the eval.detail calls made for the CSV)
+    std::vector<double> s_drag, s_mass, s_sm, s_ar, s_span;
+
     for (std::size_t k = 0; k < front.size(); ++k) {
         const Candidate& c = pop[front[k]];
         EvalResult r = eval.detail(c.genes);
@@ -97,13 +101,49 @@ int main(int argc, char** argv) {
             << r.mp.b_full << "," << r.mp.AR << "," << r.geom.root_chord << ","
             << r.geom.tip_chord << "," << (r.geom.le_sweep * RAD2DEG) << ","
             << (r.geom.washout * RAD2DEG) << "," << r.aero.CL << "," << r.aero.CD
-            << "," << r.aero.hinge_moment << ","
+            << "," << r.aero.hinge_moment << "," << r.aero.roll_helix << ","
             << (r.geom.mode == ControlMode::Elevon ? "elevon" : "split") << "\n";
+        s_drag.push_back(c.objectives[OBJ_DRAG]);
+        s_mass.push_back(c.objectives[OBJ_MASS]);
+        s_sm.push_back(r.aero.static_margin * 100.0);
+        s_ar.push_back(r.mp.AR);
+        s_span.push_back(r.mp.b_full);
     }
     csv.close();
 
     std::cout << "\nPareto set (feasible front 0): " << front.size()
               << " designs -> out/pareto.csv\n";
+
+    if (!s_drag.empty()) {
+        // Print min/median/max summary
+        auto med = [](std::vector<double> v) -> double {
+            std::sort(v.begin(), v.end());
+            std::size_t n = v.size();
+            return (n % 2) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+        };
+        std::cout << std::fixed;
+        std::cout << "\n  front summary         min       median       max\n";
+        std::cout << "  drag   N :       " << std::setprecision(3)
+                  << *std::min_element(s_drag.begin(),s_drag.end()) << "      "
+                  << med(s_drag) << "      "
+                  << *std::max_element(s_drag.begin(),s_drag.end()) << "\n";
+        std::cout << "  mass   kg:       " << std::setprecision(3)
+                  << *std::min_element(s_mass.begin(),s_mass.end()) << "      "
+                  << med(s_mass) << "      "
+                  << *std::max_element(s_mass.begin(),s_mass.end()) << "\n";
+        std::cout << "  SM     % :       " << std::setprecision(2)
+                  << *std::min_element(s_sm.begin(),s_sm.end()) << "       "
+                  << med(s_sm) << "       "
+                  << *std::max_element(s_sm.begin(),s_sm.end()) << "\n";
+        std::cout << "  AR       :       " << std::setprecision(2)
+                  << *std::min_element(s_ar.begin(),s_ar.end()) << "        "
+                  << med(s_ar) << "        "
+                  << *std::max_element(s_ar.begin(),s_ar.end()) << "\n";
+        std::cout << "  span   m :       " << std::setprecision(3)
+                  << *std::min_element(s_span.begin(),s_span.end()) << "      "
+                  << med(s_span) << "      "
+                  << *std::max_element(s_span.begin(),s_span.end()) << "\n";
+    }
 
     if (!front.empty()) {
         auto pick = [&](int obj) {

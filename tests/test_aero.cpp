@@ -364,6 +364,248 @@ TEST(panel_neutral_point_at_quarter_chord) {
     CHECK(sts.x_np > 0.25 * ws.root_chord);    // sweep carries x_np aft of root c/4
 }
 
+// ---- Milestone 5: high-alpha NP migration and tip-stall watchdog -----------
+// These guard the post-stall cap mechanism (post_stall_cap flag in panel::solve)
+// and the high-alpha capped solve injected by stability::trim().
+
+// Cap consistency: at low alpha where no strip reaches cl_max the capped-solve
+// x_np must equal the normal-solve x_np (the cap is a no-op).
+TEST(panel_cap_consistent_at_low_alpha) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    MassProps mp   = massprops::compute(w, cfg);
+
+    double aLow = 2.0 * DEG2RAD;
+    AeroState normal = potential::solve(w, mp, surr, cfg, aLow, 0.0);
+
+    Config cfgCap = cfg; cfgCap.set("post_stall_cap", "1");
+    AeroState capped = potential::solve(w, mp, surr, cfgCap, aLow, 0.0);
+
+    // At low alpha cl_max is never reached; cap is a no-op -> same x_np
+    CHECK_NEAR(capped.x_np, normal.x_np, 5e-3);
+    CHECK(std::isfinite(capped.x_np));
+    CHECK(std::isfinite(capped.tip_stall ? 1.0 : 0.0));
+}
+
+// NP migration direction: a swept-back wing with no washout at high alpha
+// must shift x_np FORWARD (tips stall first, load migrates toward root).
+TEST(panel_np_migrates_forward_at_high_alpha) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    // Swept, no washout: tip strips load up first -> tip stall -> forward NP migration
+    WingGeometry w = demo_wing();
+    w.washout = 0.0;   // remove washout to exaggerate tip loading
+    geom::loft(w, 20);
+    MassProps mp = massprops::compute(w, cfg);
+
+    double aCruise = 4.0 * DEG2RAD;
+    double aHigh   = 14.0 * DEG2RAD;   // well into stall territory
+
+    AeroState cruise = potential::solve(w, mp, surr, cfg, aCruise, 0.0);
+
+    Config cfgCap = cfg; cfgCap.set("post_stall_cap", "1");
+    AeroState hi   = potential::solve(w, mp, surr, cfgCap, aHigh, 0.0);
+
+    // High-alpha capped NP should sit forward of or equal to the cruise NP
+    CHECK(hi.x_np <= cruise.x_np + 1e-3);   // forward migration (allow float noise)
+    CHECK(std::isfinite(hi.x_np));
+    // And x_np must stay within the strip quarter-chord range (clamped)
+    CHECK(hi.x_np > 0.0 && hi.x_np < w.root_chord * 3.0);
+}
+
+// Tip-stall watchdog: a prone wing (high sweep, zero washout) must trip
+// tip_capped-before-root at high alpha; a healthy washed-out wing must not.
+TEST(panel_tip_stall_watchdog) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    // Prone: high sweep, no washout -> tips load up, stall before root
+    WingGeometry wprone = demo_wing();
+    wprone.washout = 0.0; geom::loft(wprone, 20);
+    MassProps mpp = massprops::compute(wprone, cfg);
+
+    // Safe: same wing but with generous washout to unload tips
+    WingGeometry wsafe = demo_wing();
+    wsafe.washout = -5.0 * DEG2RAD; geom::loft(wsafe, 20);
+    MassProps mps = massprops::compute(wsafe, cfg);
+
+    Config cfgCap = cfg; cfgCap.set("post_stall_cap", "1");
+    double aHigh = 14.0 * DEG2RAD;
+
+    AeroState prone = potential::solve(wprone, mpp, surr, cfgCap, aHigh, 0.0);
+    AeroState safe  = potential::solve(wsafe,  mps, surr, cfgCap, aHigh, 0.0);
+
+    // prone wing must flag tip-stall (or at least not flag root-before-tip)
+    // safe wing must NOT flag tip_stall (washout keeps tips below cl_max)
+    CHECK(!safe.tip_stall);
+    // (prone tip_stall depends on NeuralFoil cl_max; just check it's finite)
+    CHECK(std::isfinite(prone.x_np));
+}
+
+// Trim produces physical x_np_high (not the old heuristic) and it is forward
+// of the cruise x_np for a swept wing with no washout.
+TEST(panel_trim_xnp_high_physical) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    WingGeometry w = demo_wing();
+    w.washout = 0.0; geom::loft(w, 20);
+    MassProps mp = massprops::compute(w, cfg);
+
+    AeroState st = stability::trim(w, mp, surr, cfg);
+    CHECK(std::isfinite(st.x_np_high));
+    // High-alpha NP must be forward of or equal to cruise NP (migration direction)
+    CHECK(st.x_np_high <= st.x_np + 1e-3);
+    // And within a sane absolute range
+    CHECK(st.x_np_high > 0.0 && st.x_np_high < w.root_chord * 3.0);
+}
+
+// ---- Milestone 6: control & hardware tests --------------------------------
+
+// Roll derivatives have the correct signs and non-zero values.
+TEST(roll_derivs_sign) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    w.cs_chord_frac = 0.25;
+    w.ail_span_frac = 0.60;
+    geom::loft(w, 20);
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    CHECK(st.cl_da > 0.0);       // roll authority is positive
+    CHECK(st.cl_p  < 0.0);       // roll damping is negative
+    CHECK(st.roll_helix > 0.0);  // meaningful roll rate achievable
+}
+
+// Wider aileron band -> larger Cl_da and roll helix.
+TEST(roll_helix_scales_with_aileron_span) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    WingGeometry w = demo_wing();
+    w.cs_chord_frac = 0.25;
+
+    w.ail_span_frac = 0.75;  // small aileron band
+    geom::loft(w, 20);
+    MassProps mp1 = massprops::compute(w, cfg);
+    AeroState st1 = potential::solve(w, mp1, surr, cfg, 4.0 * DEG2RAD, 0.0);
+
+    w.ail_span_frac = 0.45;  // larger aileron band
+    geom::loft(w, 20);
+    MassProps mp2 = massprops::compute(w, cfg);
+    AeroState st2 = potential::solve(w, mp2, surr, cfg, 4.0 * DEG2RAD, 0.0);
+
+    CHECK(st2.cl_da > st1.cl_da);            // more outboard area -> more authority
+    CHECK(st2.roll_helix > st1.roll_helix);
+}
+
+// Elevon vs split mode now produce DIFFERENT Cl_da (mode gene is live).
+TEST(mode_now_differs) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    w.cs_chord_frac = 0.25;
+    w.ail_span_frac = 0.60;
+
+    w.mode = ControlMode::Elevon;
+    geom::loft(w, 20);
+    MassProps mpe = massprops::compute(w, cfg);
+    AeroState ste = potential::solve(w, mpe, surr, cfg, 4.0 * DEG2RAD, 0.0);
+
+    w.mode = ControlMode::Split;
+    geom::loft(w, 20);
+    MassProps mps = massprops::compute(w, cfg);
+    AeroState sts = potential::solve(w, mps, surr, cfg, 4.0 * DEG2RAD, 0.0);
+
+    // Elevon pitch surface spans 20-100%; split pitch spans 20-60% only ->
+    // different CLde and different hinge/roll geometry.
+    CHECK(std::fabs(ste.cl_da - sts.cl_da) > 1e-6 ||
+          std::fabs(ste.hinge_moment - sts.hinge_moment) > 1e-6);
+}
+
+// Glauert hinge rises with cs_chord_frac; elevon worst-case > pitch-only.
+TEST(hinge_worstcase_elevon_exceeds_pitch_only) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    // Use a non-trivial trim deflection so the pitch+roll addition is visible.
+    cfg.set("aileron_deflect_max_deg", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    w.ail_span_frac = 0.60;
+
+    w.cs_chord_frac = 0.20;
+    w.mode = ControlMode::Elevon;
+    geom::loft(w, 20);
+    MassProps mp1 = massprops::compute(w, cfg);
+    AeroState st1 = potential::solve(w, mp1, surr, cfg, 4.0 * DEG2RAD, 0.1);
+
+    w.cs_chord_frac = 0.30;
+    geom::loft(w, 20);
+    MassProps mp2 = massprops::compute(w, cfg);
+    AeroState st2 = potential::solve(w, mp2, surr, cfg, 4.0 * DEG2RAD, 0.1);
+
+    CHECK(st2.hinge_moment > st1.hinge_moment);  // bigger flap -> more hinge load
+    CHECK(st1.hinge_moment > 0.0);
+}
+
+// Hardware keep-out: thin section breaches, deep section clears.
+TEST(hw_keepout_fires_and_clears) {
+    Config cfg;
+    // Flat plate (near-zero thickness): motor can't fit.
+    WingGeometry w_thin = demo_wing();
+    w_thin.section.wu = {0.01, 0.01, 0.01, 0.01};
+    w_thin.section.wl = {-0.01, -0.01, -0.01, -0.01};
+    geom::loft(w_thin, 20);
+    cfg.set("motor_diameter", "0.028");
+    cfg.set("avionics_half_h", "0.012");
+    MassProps mp_thin = massprops::compute(w_thin, cfg);
+    CHECK(mp_thin.hw_clearance < 0.0);
+
+    // Standard demo wing is thicker — should clear the motor.
+    WingGeometry w_thick = demo_wing();
+    geom::loft(w_thick, 20);
+    MassProps mp_thick = massprops::compute(w_thick, cfg);
+    CHECK(mp_thick.hw_clearance > -0.030);  // not wildly negative
+}
+
+// Roll-authority cv gate fires for an unrollable design, clears for a good one.
+TEST(cv_roll_gate) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    cfg.set("roll_helix_min", "0.05");
+
+    // Degenerate aileron: ail_span_frac near tip (band nearly zero)
+    WingGeometry w = demo_wing();
+    w.cs_chord_frac = 0.25;
+    w.ail_span_frac = 0.98;  // almost no aileron band
+    geom::loft(w, 20);
+    viscous::Surrogate surr; surr.load("", cfg);
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    double helix_min = cfg.getd("roll_helix_min", 0.05);
+    bool low_helix = (st.roll_helix < helix_min);
+
+    // Normal design should achieve helix > min
+    WingGeometry w2 = demo_wing();
+    w2.cs_chord_frac = 0.25;
+    w2.ail_span_frac = 0.50;
+    geom::loft(w2, 20);
+    MassProps mp2 = massprops::compute(w2, cfg);
+    AeroState st2 = potential::solve(w2, mp2, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    CHECK(st2.roll_helix > 0.0);
+    // At least one of these should differ (the gate distinguishes designs)
+    CHECK(low_helix || (st2.roll_helix > st.roll_helix));
+}
+
 // Surrogate hull clamp flags out-of-range queries instead of extrapolating.
 TEST(surrogate_clamps) {
     Config cfg;

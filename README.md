@@ -44,6 +44,8 @@ Deb's **constraint-domination**.
 | Airfoil seeds (.dat + NACA) + ancestry injection | ✅ implemented + tested |
 | Viscous engine (NeuralFoil in-process neural surrogate, shape-parameterized) | ✅ default backend; Table (read-only CSV) + Analytic fallbacks |
 | **3D aerodynamics** | ✅ **Morino panel solver (default)** — AVL-validated; VLM is the fallback |
+| **High-α stability** | ✅ **Physical NP migration + tip-stall** — post-stall cap replaces heuristic |
+| **Control & hardware** | ✅ **Mode-aware roll authority, Glauert hinge moments, keep-out constraints** — 18-gene genome |
 
 3D aerodynamics defaults to the **Morino Dirichlet panel solver** (`aero_model = panel`,
 `src/aero_panel.cpp`): a constant-strength doublet/source method with strip viscous
@@ -202,6 +204,8 @@ seed airfoils (see [Airfoil seeds](#airfoil-seeds-ancestry-injection)).
 | 10–13 | `wl0..wl3` | lower CST weights (aft drives **reflex**) | ~−0.22 – 0.20 |
 | 14 | `te_frac` | trailing-edge thickness (fraction of chord) | 0.002 – 0.010 |
 | 15 | `mode` | <0.5 = elevon, ≥0.5 = split control | 0 – 1 |
+| 16 | `cs_chord_frac` | control-surface chord fraction | 0.15 – 0.35 |
+| 17 | `ail_span_frac` | aileron inboard edge (fraction of semi-span) | 0.40 – 0.80 |
 
 ### Phase 1 — Geometry (`geom.cpp`)
 
@@ -311,6 +315,8 @@ fatal ones dominate the merely marginal:
 | Tip-stall watchdog (§6) | outboard station stalled at cruise | 20 |
 | Trim convergence | Newton failed to trim | 100 |
 | Static stability floor | `SM < 0` (NP forward of CG) | 25 |
+| Roll authority (M6) | `roll_helix < roll_helix_min` (pb/2V floor) | 30 |
+| Hardware keep-out (M6) | motor/avionics don't fit in section | 30 |
 
 ---
 
@@ -482,12 +488,18 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 | `sm_band_lo` / `sm_band_hi` | 0.06 / 0.08 | target static-margin band |
 | `thrust_z_offset` | 0.020 | thrust line above CG (m) |
 | `hinge_moment_max` | 1.2 | fatal servo torque (kg·cm) |
+| `roll_helix_min` | 0.05 | steady helix pb/2V floor (0 = disabled) |
+| `aileron_deflect_max_deg` | 20 | max aileron throw (°) |
+| `aileron_diff_ratio` | 4 | up/down differential ratio |
+| `motor_diameter` | 0.028 | outrunner can diameter for keep-out (m) |
+| `avionics_half_h` | 0.012 | avionics block half-height for keep-out (m) |
 | `sweep_crossflow_deg` | 25.0 | LE-sweep crossflow threshold (°) |
 | `crossflow_factor` | 1.15 | outer-span profile-drag multiplier |
 | `ncrit` | 4.0 | viscous transition Ncrit (printed roughness) |
 | `viscous_backend` | `neuralfoil` | viscous engine: `neuralfoil` (default), `table`, or `analytic` |
 | `neuralfoil_dir` | `data/Neurafoilbin` | NeuralFoil nn-large weight `.bin` directory |
 | `aero_model` | `panel` | 3D model: `panel` (Morino, default) or `vlm` (analytic fallback) |
+| `high_alpha_deg` | 12 | angle of attack (°) for the high-α capped solve that evaluates NP migration and tip-stall; panel model only |
 | `panel_chordwise` | 10 | chordwise panels per surface (dominant cost knob; see [Performance](#performance--cost)) |
 | `panel_chord_spacing` | `halfcosine` | chordwise node spacing: `halfcosine` (convergent) or `cosine` (legacy) |
 | `panel_wake_chords` | 20 | trailing wake length, in root chords |
@@ -543,13 +555,13 @@ These are deliberate placeholders behind clean interfaces, slated for replacemen
 
 - **3D aero is the Morino panel method** (default); the analytic VLM reference model is the
   `aero_model = vlm` fallback.
-- **High-α NP migration** is a sweep/α heuristic, not a real high-α solve.
+- **High-α NP migration** is now a physical per-station post-stall `cl` cap applied at `high_alpha_deg` (Milestone 5); the old sweep/washout heuristic is gone.
 - **Control derivatives** (elevon/elevator effectiveness, hinge moment) use simple flap
   theory — adequate for ranking, not absolute servo sizing.
-- **Split-mode roll authority** and the 4:1 differential mixing aren't modeled (only pitch
-  trim is solved); the control mode is a gene but only affects the pitch surface today.
-- **Hardware keep-outs** (motor zone, avionics 20–50% span placement) are assumed, not
-  enforced as hard constraints.
+- **Adverse yaw** from differential aileron deflection is not modeled (the 4:1 ratio sets
+  the deflection budget for roll authority, but Cn_da/Cn_p yaw coupling is absent).
+- **Battery-fit keep-out** is not checked (motor + avionics are; battery dimensions are
+  not a design variable yet).
 
 ---
 
@@ -585,14 +597,27 @@ coupling biasing `cd` ~20–30 % high on cambered sections) is moot now that Neu
 supplies the polar directly. The pre-computed `polar_coeffs.csv` it produced is retained as
 the read-only `viscous_backend = table` fallback.
 
-### Milestone 5 — High-α & nonlinear stability
-Replace the NP-migration heuristic with a high-α evaluation from the panel solver; add a
-proper post-stall `cl` cap per station; re-validate the tip-stall watchdog.
+### Milestone 5 — High-α & nonlinear stability ✅ (done)
+`x_np_high` (neutral-point at high α, the pitch-up gate) and `tip_stall` (tips-before-root
+watchdog) are now physical outputs of a real high-α panel solve instead of a sweep/washout
+heuristic. After `stability::trim()` converges, it runs one extra capped `panel::solve()` at
+`high_alpha_deg` (default 12°): each strip's sweep-normal `cl` is capped at its NeuralFoil
+`cl_max`; the capped-load centroid replaces the load-weighted `x_np`; tip-stall fires when
+tips are capped before the root. The warm frozen-wake AIC is reused, so the extra solve costs
+one back-substitution + one strip loop — negligible vs the ~256 ms cold AIC. VLM fallback
+model retains the analytic heuristic (it has no strip `cl_max`).
 
-### Milestone 6 — Full control & hardware constraints
-Model split-mode roll authority and the 4:1 differential mixing; size servos from real
-hinge moments; add motor keep-out and avionics-placement hard constraints; optionally make
-control-surface chord/span design variables.
+### Milestone 6 — Full control & hardware constraints ✅ (done)
+`mode` gene is now live: **Elevon** (one shared pitch/roll surface, 20%–100% span) vs
+**Split** (inboard elevator + outboard ailerons, split at `ail_span_frac`). Two new design
+variables (`cs_chord_frac`, `ail_span_frac`) make control-surface geometry a GA trade-off.
+- **Roll authority** (`src/control.cpp`): strip-theory Cl_δa + Cl_p → steady helix
+  `pb/2V = −Cl_da·da_eff / Cl_p` (4:1 differential). Gated against `roll_helix_min`.
+- **Hinge moments**: Glauert thin-airfoil Ch_α/Ch_δ (replaces `0.45|δ|+0.05|α|` heuristic);
+  worst-case = pitch trim + full roll throw (elevon) or `max(pitch, roll)` (split).
+- **Hardware keep-outs**: motor-can at 80% root chord + avionics block at 35% span/30%
+  chord, checked against section half-thickness — breaches penalized in cv.
+- Control model centralized in `src/control.cpp` (was duplicated in both aero backends).
 
 ### Milestone 7 — UX & analysis
 - Pareto-front visualization (export to a plotting-friendly format / small viewer).
