@@ -5,11 +5,12 @@ of designs with **NSGA-II** and returns a **Pareto front** trading three objecti
 
 - **Drag** (N, trimmed level cruise at 15 m/s)
 - **Mass** (kg, structure + payload)
-- **Static-margin deviation** from a target 6–8% MAC band
+- **Static-margin deviation** from a target 6-8% MAC band
 
-…subject to hard constraints (TE thickness, tip Reynolds floor, spar/OML clearance,
-servo hinge-moment limit, high-α neutral-point migration, tip-stall) handled with
-Deb's **constraint-domination**.
+It uses constraint-domination gates such as TE thickness, tip Reynolds floor,
+spar/OML clearance, hinge moment, high-alpha neutral-point migration, tip-stall,
+roll authority, hardware keep-out, section validity, adverse yaw, and static-margin
+floors.
 
 ---
 
@@ -35,28 +36,23 @@ Deb's **constraint-domination**.
 
 ## Milestone status (read this first)
 
-| Phase | Status |
+| Area | Status |
 |------|--------|
-| Geometry (CST, lofting, seeding) | ✅ implemented + tested |
-| Mass properties (sectional integration, spar clearance) | ✅ implemented + tested |
-| Stability & trim (Newton, SM objective, watchdogs) | ✅ implemented + tested |
-| NSGA-II (fronts, crowding, SBX/PM, constraint-domination) | ✅ implemented + tested |
-| Airfoil seeds (.dat + NACA) + ancestry injection | ✅ implemented + tested |
-| Viscous engine (NeuralFoil in-process neural surrogate, shape-parameterized) | ✅ default backend; Table (read-only CSV) + Analytic fallbacks |
-| **3D aerodynamics** | ✅ **Morino panel solver (default)** — AVL-validated; VLM is the fallback |
-| **High-α stability** | ✅ **Physical NP migration + tip-stall** — post-stall cap replaces heuristic |
-| **Control & hardware** | ✅ **Mode-aware roll authority, Glauert hinge moments, keep-out constraints** — 18-gene genome |
+| Geometry | Implemented and tested: CST sections, root/tip lofting, seeding, tip TE closure |
+| Mass properties | Implemented and tested: sectional integration, CG, spar and hardware clearance outputs |
+| Stability and trim | Implemented and tested: Newton trim, SM objective, high-alpha watchdogs |
+| NSGA-II | Implemented and tested: fronts, crowding, SBX/PM, constraint-domination |
+| Viscous engine | NeuralFoil is the default; table and analytic backends remain fallbacks |
+| 3D aerodynamics | Morino panel solver is the default model; VLM remains the fallback |
+| Control | Mode-aware roll authority, hinge moments, and adverse-yaw derivative are computed |
+| Dynamic stability | Dutch-roll damping ratio and phugoid damping ratio computed per design via strip-theory Cn_β/Cn_r + Lanchester phugoid; reported in pareto.csv; opt-in cv gate |
+| Release gates | Safety gates and surrogate-confidence gate are on by default |
 
-3D aerodynamics defaults to the **Morino Dirichlet panel solver** (`aero_model = panel`,
-`src/aero_panel.cpp`): a constant-strength doublet/source method with strip viscous
-coupling. It passes every analytic gate in `tests/test_aero.cpp` (lift slope
-`2π·AR/(AR+2)`, elliptic induced drag, trim convergence, quarter-chord neutral point) and
-is cross-checked against **AVL** on the `knee` / `min_drag` / `min_mass` decks — CLα within
-~0.1–2.5 %, neutral point within a few % MAC. The earlier finite-wing analytic model
-(Prandtl lift slope + strip coupling) remains available as the documented fallback via
-`aero_model = vlm` in `aero_potential::solve()`, behind the same signature.
+## Current state
 
----
+AeroAnalyzer is past the original prototype milestones. The live architecture is a 26-gene root/tip CST flying-wing optimizer using the Morino panel solver and NeuralFoil by default. Section shape lofts continuously from a root CST profile to a tip CST profile — the planform outline (LE/TE) is a straight swept taper, but the cross-sections are organically varying. The remaining open work is larger features: richer planform geometry (curved LE/TE, 3+ spanwise sections) and UX (visualization, checkpoint/restart, sensitivity sweeps).
+
+3D aerodynamics defaults to the Morino Dirichlet panel solver (aero_model = panel, src/aero_panel.cpp): a constant-strength doublet/source method with strip viscous coupling. The earlier finite-wing analytic model remains available as aero_model = vlm behind the same solve signature.
 
 ## Build it yourself
 
@@ -118,7 +114,7 @@ Outputs land in `out\`:
 
 - **`pareto.csv`** — every feasible front-0 design, one row each. Columns:
   `idx, drag_N, mass_kg, sm_dev, static_margin, span_m, AR, root_c, tip_c, sweep_deg,
-  washout_deg, CL, CD, hinge_kgcm, mode`.
+  washout_deg, CL, CD, hinge_kgcm, roll_helix, mode, dutch_roll_zeta, phugoid_zeta`.
 - **`min_drag.avl`, `min_mass.avl`, `knee.avl`** (+ matching `.dat` section files) —
   AVL decks for the three incumbents (the two single-objective extremes and the
   normalized-L2 "knee" of the front), ready to open in **AVL** for an independent
@@ -186,163 +182,110 @@ out/                    pareto.csv + AVL decks (created at run)
 
 ## Implementation details
 
-### Design genome (16 genes)
+### Design genome (26 genes)
 
-The GA optimizes a fixed-length real vector decoded by `geom::decode()`. Bounds come from
-`geom::default_genome()`; the CST and TE bounds are **widened at startup** to contain the
-seed airfoils (see [Airfoil seeds](#airfoil-seeds-ancestry-injection)).
+The GA optimizes a fixed-length real vector decoded by geom::decode(). Bounds come from geom::default_genome(); CST and TE bounds are widened at startup to contain seed airfoils. The genome is now root/tip aware, so section shape can vary along the span.
 
 | Idx | Gene | Meaning | Default bounds |
 |----:|------|---------|----------------|
-| 0 | `root_chord_m` | root chord (m) | 0.18 – 0.35 |
-| 1 | `taper_ratio` | tip/root chord | 0.30 – 0.90 |
-| 2 | `semi_span_m` | half span (m) | 0.45 – 0.80 |
-| 3 | `le_sweep_deg` | leading-edge sweep (°) | 8 – 30 |
-| 4 | `washout_deg` | tip twist (°, −=washout) | −6 – 0 |
-| 5 | `battery_x_m` | battery-box CG x (m) — the SM trim handle | 0.00 – 0.22 |
-| 6–9 | `wu0..wu3` | upper CST (Bernstein) weights | ~0.06 – 0.34 |
-| 10–13 | `wl0..wl3` | lower CST weights (aft drives **reflex**) | ~−0.22 – 0.20 |
-| 14 | `te_frac` | trailing-edge thickness (fraction of chord) | 0.002 – 0.010 |
-| 15 | `mode` | <0.5 = elevon, ≥0.5 = split control | 0 – 1 |
-| 16 | `cs_chord_frac` | control-surface chord fraction | 0.15 – 0.35 |
-| 17 | `ail_span_frac` | aileron inboard edge (fraction of semi-span) | 0.40 – 0.80 |
+| 0 | root_chord_m | root chord (m) | 0.18 - 0.35 |
+| 1 | taper_ratio | tip/root chord | 0.30 - 0.90 |
+| 2 | semi_span_m | half span (m) | 0.45 - 0.80 |
+| 3 | le_sweep_deg | leading-edge sweep (deg) | 8 - 30 |
+| 4 | washout_deg | tip twist (deg; negative = washout) | -6 - 0 |
+| 5 | battery_x_m | battery-box CG x (m), the trim handle | 0.00 - 0.22 |
+| 6-9 | wu0..wu3 | root upper CST weights | ~0.06 - 0.34 |
+| 10-13 | wl0..wl3 | root lower CST weights; aft weight drives reflex | ~-0.22 - 0.20 |
+| 14 | te_frac | root trailing-edge thickness fraction | 0.002 - 0.010 |
+| 15 | mode | <0.5 = elevon, >=0.5 = split control | 0 - 1 |
+| 16 | cs_chord_frac | control-surface chord fraction | 0.15 - 0.35 |
+| 17 | ail_span_frac | aileron inboard edge, fraction of semi-span | 0.40 - 0.80 |
+| 18-21 | tip_wu0..tip_wu3 | tip upper CST weights | root bounds mirrored |
+| 22-25 | tip_wl0..tip_wl3 | tip lower CST weights | root bounds mirrored |
 
-### Phase 1 — Geometry (`geom.cpp`)
+### Phase 1 - Geometry (geom.cpp)
 
-- **CST (Kulfan) airfoil:** `y(x) = C(x)·S(x) + x·(te/2)`, class function `C = x^N1 (1−x)^N2`
-  with `N1=0.5, N2=1.0` (round LE, sharp TE), shape `S` a Bernstein-polynomial sum over
-  4 weights per surface. Independent upper/lower weights make **reflex** representable —
-  essential for a tailless wing's pitch trim.
-- **CST fit** (`fit_cst`) solves a small linear least-squares (normal equations via
-  `linalg::lstsq`) for the weights given sampled `(x, z)` points. Used for ancestry
-  injection and validated by a round-trip test.
-- **Thin-airfoil coefficients** (`thin_airfoil`) integrate the camber-line slope to get
-  zero-lift angle `α_L0`, aerodynamic-center moment `cm_ac` (positive for reflex → enables
-  tailless trim), and `cl_α = 2π`.
-- **Lofting** (`loft`) maps the section across **20 cosine-spaced** spanwise stations
-  (clustered at root and tip), applying linear taper, **sheared sweep** (`x_le = y·tanΛ`,
-  which preserves streamwise sections), and linear washout. Each station carries a strip
-  width for trapezoidal integration.
-- **Planform** integrals give `S_ref`, MAC, MAC-LE x, span, and AR from the stations.
+- CST airfoils use the Kulfan form y(x) = C(x) * S(x) +/- x * te/2 with N1 = 0.5 and N2 = 1.0.
+- fit_cst solves the least-squares fit used by ancestry injection and the CST round-trip tests.
+- loft maps the wing across cosine-spaced span stations, interpolating root to tip CST weights while applying taper, sweep, and washout.
+- evaluate.cpp applies te_thick_tip_frac after decode so the tip can close without a physical endplate.
+- Planform integrals produce S_ref, MAC, MAC-LE x, span, and AR.
 
-### Phase 2 — Mass properties (`massprops.cpp`)
+### Phase 2 - Mass properties (massprops.cpp)
 
-Cross-sectional lofting (**not** B-Rep — no boolean kernel, no voxels):
+- Section area and perimeter come directly from the local CST shape.
+- Structural mass uses shell thickness plus a root-to-tip infill gradient.
+- Motor, battery, avionics, and servos are point masses for total mass and CG.
+- Spar clearance and hardware clearance are computed in massprops.cpp and enforced in evaluate.cpp.
 
-- Normalized section area `Â` and perimeter `P̂` integrated once from the CST shape.
-- Per station: `enclosed = Â·c²`, `shell = P̂·c·t_shell`, and a **linear infill gradient**
-  (root→tip) gives an equivalent solid area `shell + infill·(enclosed − shell)`. Spanwise
-  **trapezoidal** accumulation yields structural volume → mass (×2 for both halves).
-- **Point masses** (motor at root TE, battery at `battery_x`, avionics block over 20–50%
-  span, 2 servos) are added with chordwise centroids to compute total mass and **CG**.
-- **Analytic spar clearance:** at each station, clearance = local half-thickness at the
-  spar's chordwise position − spar radius (negative = OML breach). The spar follows the
-  swept 15%-local-chord line by default (`spar_straight = 0`); a literal straight tube
-  (`spar_straight = 1`) breaches the OML on swept wings and is what made every early
-  candidate infeasible.
+### Phase 3 - Aerodynamics (aero_potential.cpp and aero_panel.cpp)
 
-### Phase 3 — Aerodynamics (`aero_potential.cpp`) — *VLM fallback*
+- aero_model = panel dispatches to the Morino Dirichlet panel solver.
+- aero_model = vlm remains the fast analytic fallback for exploratory sweeps.
+- The panel solver builds a dense AIC matrix once per geometry and reuses it through trim.
+- The relaxed-wake pass is reserved for detailed incumbent re-evaluation; the GA hot path keeps it off.
 
-> The default model is now the Morino panel solver (`src/aero_panel.cpp`, `aero_model =
-> panel`); the analytic model below is the `aero_model = vlm` fallback, dispatched from the
-> same `solve(w, mp, surr, cfg, alpha, delta_e)` signature.
+### Phase 4 - Viscous engine (aero_viscous.cpp and aero_neuralfoil.cpp)
 
-- 3D lift slope `a = a0 / (1 + a0/(π·e·AR))` (Prandtl), `a0 = 2π`, span efficiency `e`
-  from a taper-based Oswald estimate.
-- `CL = a·(α + ½·washout − α_L0) + CL_δ·δ_e`; uniform induced angle `α_i = CL/(π·e·AR)`.
-- **Strip viscous coupling** over the 20 stations: local `cl_i = cl_α·(α + twist_i − α_L0
-  − α_i)`, queried against the surrogate at **sweep-normal** conditions (`Re = ρ·V·cosΛ·c/μ`,
-  `cl_normal = cl_i/cos²Λ`). A **smooth crossflow penalty** multiplies outer-span profile
-  drag once LE sweep exceeds ~25°.
-- `CD = CDi + CDp`, `CDi = CL²/(π·e·AR)`, `CDp` = strip integral of section `cd`.
-- **Pitching moment about CG:** `Cm = cm_ac + CL·(x_cg − x_np)/MAC + Cm_δ·δ_e − Cm_thrust`,
-  with `x_np` = area-weighted quarter-chord (captures sweep) and a thrust-line Z-offset
-  term. **Hinge moment** (servo torque, kg·cm) and a heuristic **high-α NP migration**
-  estimate (swept tips unload, washout relieves) are produced for the watchdogs.
+- NeuralFoil nn-large is the default section polar engine.
+- The native C++ forward pass loads extracted .bin weights from data/Neurafoilbin.
+- The legacy table backend and analytic backend remain fallbacks.
+- The backend still presents the existing compact polar query contract to trim and drag code.
 
-### Phase 4 — Viscous engine (`aero_viscous.cpp` + `aero_neuralfoil.cpp`)
+### Phase 5 - Stability and trim (stability.cpp)
 
-See [Viscous engine: NeuralFoil](#viscous-engine-neuralfoil-runtime-default). Every query
-returns a compact polar `cd = cd0 + k·cl²` with a `cl_max/cl_min` clamp; the default
-NeuralFoil backend synthesizes the 5 coefficients per (shape, Re) on the fly.
+- Trim is Newton-Raphson on alpha and elevator deflection for CL = W/(qS) and Cm = 0.
+- Static-margin objective is zero inside the configured band and distance-to-band outside it.
+- High-alpha panel re-evaluation supplies the pitch-up and tip-stall watchdogs.
 
-### Phase 5 — Stability & trim (`stability.cpp`)
+### NSGA-II (ga.cpp)
 
-- **Trim:** Newton–Raphson on `(α, δ_e)` solving `CL = W/(q·S)` and `Cm = 0`
-  simultaneously. The 2×2 Jacobian is built by **finite differences** of `solve()`, which
-  keeps it valid for the nonlinear panel solver. Step-clamped (≤5°) for robustness;
-  `state.trimmed = false` if it fails to converge (which the constraints penalize hard). For
-  the panel model the wake is **frozen across the whole Newton solve** so the dense AIC is
-  built once per candidate, not once per α step — see [Performance](#performance--cost).
-- **SM objective:** `sm_objective(SM, lo, hi)` = 0 inside the band, else distance to the
-  nearest edge (this is the minimized third objective).
-
-### NSGA-II (`ga.cpp`)
-
-- **Constraint-domination** (Deb 2002): feasible beats infeasible; among infeasible the
-  smaller total violation wins; among feasible, ordinary Pareto dominance on the 3
-  objectives.
-- `fast_nondominated_sort` ranks into fronts; `crowding_distance` preserves diversity
-  (boundary points get ∞). Selection is a binary tournament on (rank, crowding).
-- **Operators:** SBX crossover (`eta_cx`) + bounded polynomial mutation (`eta_mut`,
-  per-gene prob `1/n` by default). Elitist truncation: combine parents+offspring, fill the
-  next generation by fronts then crowding.
-- **Seeding:** the first ~50% of the initial population is taken from seed genomes (elites
-  + hybrids), the rest random explorers.
-
----
+- Constraint-domination follows Deb 2002.
+- Fast nondominated sorting and crowding distance preserve front diversity.
+- SBX crossover and bounded polynomial mutation are the variation operators.
+- The initial population mixes seed elites, seeded hybrids, and random explorers.
 
 ## Objectives & constraints
 
-**Objectives (all minimized)** — `src/evaluate.cpp`:
+Objectives are all minimized in src/evaluate.cpp.
 
 | # | Objective | Definition |
 |---|-----------|------------|
-| `OBJ_DRAG` | drag force | `CD · q · S_ref` (N) at trimmed cruise |
-| `OBJ_MASS` | mass | total structure + payload (kg) |
-| `OBJ_SM` | stability | deviation of static margin from the `[sm_band_lo, sm_band_hi]` band |
+| OBJ_DRAG | Drag force | CD * q * S_ref at trimmed cruise |
+| OBJ_MASS | Mass | Total structure plus payload |
+| OBJ_SM | Stability | Static-margin deviation from sm_band_lo..sm_band_hi |
 
-**Constraints** → summed into a single violation `cv` (0 = feasible), weighted so the
-fatal ones dominate the merely marginal:
+Currently enforced constraints are summed into cv, where cv = 0 means feasible.
 
-| Constraint (plan ref) | Trigger | Weight |
-|-----------------------|---------|-------:|
-| TE thickness clamp (§3) | `te_frac·root_chord < te_thick_min_mm` | 50 |
-| Tip Reynolds floor (§3) | `Re_tip < re_tip_min` | 5 |
-| Spar/OML clearance (§4) | clearance < 1 mm (continuous); ×30 if breach | 4 / 30 |
-| Hinge-moment gate (§7) | `hinge_moment > hinge_moment_max` (fatal) | 40 |
-| High-α NP migration (§7) | `x_np_high < x_cg` (pitch-up) | 60 |
-| Tip-stall watchdog (§6) | outboard station stalled at cruise | 20 |
+| Constraint | Trigger | Weight |
+|------------|---------|-------:|
+| TE thickness clamp | te_frac * root_chord < te_thick_min_mm | 50 |
+| Tip Reynolds floor | Re_tip < re_tip_min | 5 |
+| High-alpha NP migration | x_np_high < x_cg | 60 |
+| Tip-stall watchdog | tips cap before root | 20 |
 | Trim convergence | Newton failed to trim | 100 |
-| Static stability floor | `SM < 0` (NP forward of CG) | 25 |
-| SM band floor | `SM < sm_band_lo` (keeps the front in the ≥6% band) | `sm_floor_penalty` (30; 0 = off) |
-| Roll authority (M6) | `roll_helix < roll_helix_min` (pb/2V floor) | 30 |
-| Hardware keep-out (M6) | motor/avionics don't fit in section | 30 |
-| Section validity | interior min thickness `< min_thickness_frac` (blocks self-intersecting figure-8 sections) | 40 |
+| Static stability floor | SM < 0 | 25 |
+| SM band floor | SM < sm_band_lo | sm_floor_penalty |
+| Roll authority | roll_helix < roll_helix_min | 30 |
+| Section validity | interior thickness < min_thickness_frac | 40 |
+| Adverse yaw | adverse_yaw_penalty > 0 and cn_da > 0 | adverse_yaw_penalty |
 
----
+Safety quantities now enforced by default:
+
+- Spar/OML clearance is computed in massprops.cpp and penalized below the 1 mm target.
+- Hinge moment is computed by control.cpp and penalized above hinge_moment_max.
+- Hardware keep-out is computed in massprops.cpp and penalized when motor or avionics clearance goes negative.
 
 ## Airfoil seeds (ancestry injection)
 
 The GA is seeded from real airfoils, then morphs them via the CST genes:
 
-- **Uploaded `.dat`** — drop Selig or Lednicer files in `data\airfoils\` (auto-detected,
-  any chord scale; normalized to [0,1] on load). Reflexed sections (MH/EH families) are
-  good flying-wing seeds.
-- **Generated NACA 4-digit** — listed in `seed_naca` (e.g. `0012,2412,4412`); no file
-  needed. *(5-digit like 23012 isn't generated yet — drop it as a `.dat` instead.)*
+- **Uploaded .dat** - drop Selig or Lednicer files in data/airfoils (auto-detected, any chord scale; normalized to [0,1] on load). Reflexed sections are good flying-wing seeds.
+- **Generated NACA 4-digit** - listed in seed_naca; the baseline uses 0012,2412,4412,4421,4418. Five-digit sections are not generated yet, so add those as .dat files instead.
 
-Each seed is fit to CST (4 upper + 4 lower weights). The CST gene bounds are **widened** by
-`cst_bound_margin` to contain every seed (so seeds aren't clipped **and** the GA's morph
-region matches the surrogate's trained hull). ~50% of the initial population is built from
-seeds — 10% elites (pure seed shape + mid-box planform), 40% hybrids (seed shape + random
-planform) — with the rest random explorers.
+Each seed is fit to CST as 4 upper + 4 lower weights. The CST gene bounds are widened by cst_bound_margin to contain every seed for both root and tip section genes. The initial population mixes pure seed elites, seeded root/tip hybrids with randomized planforms, and random explorers.
 
-The **hybrids jitter their airfoil genes** around the seed by `cst_seed_jitter` (a fraction
-of each CST gene's range; default 0.25). Without it, all ~50% of seeded genomes share only
-*as many distinct airfoil shapes as there are seeds* (3 by default), which starves the
-airfoil search and converges the CST genes prematurely. The elites stay pure as known-good
-anchors; set `cst_seed_jitter = 0` to recover the exact-seed behavior.
+The hybrids jitter their root and tip airfoil genes around the seed by cst_seed_jitter, a fraction of each CST gene range. Without that jitter, the seeded half collapses onto only as many distinct airfoil shapes as there are seeds, which starves the CST search. The elites stay pure as known-good anchors; set cst_seed_jitter = 0 to recover exact-seed behavior.
 
 ---
 
@@ -436,8 +379,8 @@ back-substitution, strip viscous coupling, mass/geometry — is comparatively fr
 
 | Model | Projected wall-clock |
 |-------|---------------------:|
-| **Panel, nc = 10 (default)** | **~6–7 min** |
-| Panel, nc = 6 | ~2.5 min |
+| **Panel, nc = 10 (default)** | **~13 min** |
+| Panel, nc = 6 | ~5 min |
 | VLM fallback | ~10 s |
 
 Build/test turnaround: a full `build_mingw.ps1 -Test` (clean compile of all `src/` + Eigen
@@ -452,7 +395,7 @@ one solve. But the wake **inclination** has negligible effect on attached loadin
 `dCL ~1e-11`, `dx_np ~15 µm` between a wake frozen at the initial α and one tracking α), so
 `trim()` now **freezes the wake for the whole Newton solve** (`panel_trim_freeze_wake = 1`,
 default): exactly **one AIC build per candidate**. The RHS still uses the live α, so the FD
-derivative stays exact. This took the full GA from ~85 min to ~6–7 min. Set
+derivative stays exact. This took the full GA from ~85 min to ~13 min (measured: 12T, nc=10, pop=120, 150 gens). Set
 `panel_trim_freeze_wake = 0` (and `panel_trim_freeze_jac = 0`) to restore the legacy
 rebuild-every-step behavior for comparison.
 
@@ -497,7 +440,7 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 | `sm_band_lo` / `sm_band_hi` | 0.06 / 0.08 | target static-margin band |
 | `sm_floor_penalty` | 30 | hard cv-gate weight forcing `SM ≥ sm_band_lo`; `0` = soft objective only |
 | `thrust_z_offset` | 0.020 | thrust line above CG (m) |
-| `hinge_moment_max` | 1.2 | fatal servo torque (kg·cm) |
+| `hinge_moment_max` | 10 | fatal servo torque (kg-cm) |
 | `roll_helix_min` | 0.05 | steady helix pb/2V floor (0 = disabled) |
 | `aileron_deflect_max_deg` | 20 | max aileron throw (°) |
 | `aileron_diff_ratio` | 4 | up/down differential ratio |
@@ -506,6 +449,7 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 | `sweep_crossflow_deg` | 25.0 | LE-sweep crossflow threshold (°) |
 | `crossflow_factor` | 1.15 | outer-span profile-drag multiplier |
 | `ncrit` | 4.0 | viscous transition Ncrit (printed roughness) |
+| `confidence_threshold` | 0.5 | soft cv gate for low-confidence NeuralFoil/table polars; `0` disables |
 | `viscous_backend` | `neuralfoil` | viscous engine: `neuralfoil` (default), `table`, or `analytic` |
 | `neuralfoil_dir` | `data/Neurafoilbin` | NeuralFoil nn-large weight `.bin` directory |
 | `aero_model` | `panel` | 3D model: `panel` (Morino, default) or `vlm` (analytic fallback) |
@@ -549,10 +493,17 @@ retune. A second path can be passed: `aeroanalyzer.exe path\to\my.cfg`.
 - **NSGA-II** — constraint-domination rules, known-front non-dominated sort, crowding
   boundaries = ∞.
 
-**AVL cross-check:** put `avl.exe` in `tools\bin\` (see `tools/bin/README.txt`), open
-`out\knee.avl` in it, run `OPER` → `x`, and compare `CLa`, span efficiency, and `Cm`
-against the panel solver. This is the standing oracle for the Milestone-3 panel solver
-(`scratch/knee_xcheck.cpp` reconstructs all three decks and prints the panel/VLM rows).
+**AVL cross-check:** automated via `validate_avl.ps1`. Put `avl352.exe` in `tools\bin\`
+(or pass `-AvlExe <path>`), then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File validate_avl.ps1
+```
+
+Runs AVL over the three incumbents at their panel-trimmed alpha, compares span efficiency
+and neutral-point location, prints a PASS/FAIL table, and exits non-zero on any failure.
+CL delta (~30%) is printed as INFO — the expected gap between viscous+trimmed panel and
+inviscid clean AVL. Add `-Run` to regenerate the incumbents first.
 
 **Reproducibility / OpenMP determinism** are both verified (same seed ⇒ identical
 `pareto.csv`, serial and parallel).
@@ -561,112 +512,55 @@ against the panel solver. This is the standing oracle for the Milestone-3 panel 
 
 ## Known limitations / approximations
 
-These are deliberate placeholders behind clean interfaces, slated for replacement:
+These are the remaining sharp edges rather than the model-of-record path:
 
-- **3D aero is the Morino panel method** (default); the analytic VLM reference model is the
-  `aero_model = vlm` fallback.
-- **High-α NP migration** is now a physical per-station post-stall `cl` cap applied at `high_alpha_deg` (Milestone 5); the old sweep/washout heuristic is gone.
-- **Control derivatives** (elevon/elevator effectiveness, hinge moment) use simple flap
-  theory — adequate for ranking, not absolute servo sizing.
-- **Adverse yaw** from differential aileron deflection is not modeled (the 4:1 ratio sets
-  the deflection budget for roll authority, but Cn_da/Cn_p yaw coupling is absent).
-- **Battery-fit keep-out** is not checked (motor + avionics are; battery dimensions are
-  not a design variable yet).
-
----
+- Control derivatives are strip-theory approximations intended for ranking, not final servo certification.
+- Spar/OML clearance, hinge moment, and hardware keep-out are computed but not currently fatal gates.
+- Dynamic stability (Dutch-roll + phugoid) is computed via single-DOF strip-theory / Lanchester approximations. Dutch-roll ignores roll coupling (Cl_β / dihedral effect); upgrade to a 2-DOF lateral state matrix if roll coupling matters at validation.
+- Planform outline is a single straight swept taper (linear LE/TE). Section shape lofts organically from root to tip CST profiles. Curved planforms (non-straight LE/TE) and 3+ spanwise airfoil breakpoints are future geometry work.
+- Battery dimensions are not explicit design variables yet.
+- Battery dimensions are not explicit design variables yet.
 
 ## Roadmap
 
-### Milestone 3 — Morino Dirichlet panel solver *(done — default model)*
-`aero_model = panel` (`src/aero_panel.cpp`) is the default 3D constant-strength
-doublet/source panel method, dispatched from `aero_potential::solve()` behind the
-unchanged signature.
-- Dense AIC built per geometry and **direct-LU** factored once (Eigen), reusing the
-  factorization across the trim Newton's RHS. The wake is **frozen across the Newton solve**
-  (`panel_trim_freeze_wake`, default on): the wake inclination is irrelevant to attached
-  loading (verified: dCL ~1e-11), so rebuilding it per alpha step was pure cost — freezing
-  it gives ~13× faster trims (one AIC build per candidate).
-- Trailing-edge wake via doublet-strength difference, freestream-aligned then frozen.
-- Strip viscous coupling and the `solve()` signature unchanged.
-- **Validated:** passes every `tests/test_aero.cpp` analytic gate (panel-mode lift slope,
-  elliptic `e≈1`, trim, quarter-chord NP) **and** matches AVL within a few percent on the
-  knee/min_drag/min_mass decks. The VLM remains the documented fallback (`aero_model = vlm`).
+The ordered backlog below is the current specification for what remains.
 
-### Milestone 4 — Viscous engine ✅ (NeuralFoil; XFOIL pipeline retired)
-The viscous section model is now **NeuralFoil nn-large**, a native in-process C++ forward
-pass (`src/aero_neuralfoil.cpp`) — see
-[Viscous engine: NeuralFoil](#viscous-engine-neuralfoil-runtime-default). It matches the
-reference NeuralFoil to ~5 digits on CL/CD/CM (golden test) and is continuous, smooth, and
-valid across the whole Kulfan shape space, with no GPL XFOIL dependency.
+### 1. Automate AVL validation ✓ DONE
+- `validate_avl.ps1` drives AVL over the three incumbents; exits 0 if span efficiency (10%) and neutral-point location (3% MAC) are within tolerance. CL delta (~30%) is logged as INFO.
+- Confirmed PASS: e within 3.5%, Xnp within 3.1 mm (gate = 5.6 mm) across all three incumbents.
 
-This **superseded** the earlier Milestone-4 approach (an offline XFOIL polar table built by
-`build_surrogate.exe`, fed by an in-process `aero::xfoil` reimplementation of XFOIL's core).
-That whole subsystem — the generator, the `aero::xfoil` solver, and the Fortran XFOIL
-library wrappers — has been **removed**; its only known issue (a weak viscous–inviscid
-coupling biasing `cd` ~20–30 % high on cambered sections) is moot now that NeuralFoil
-supplies the polar directly. The pre-computed `polar_coeffs.csv` it produced is retained as
-the read-only `viscous_backend = table` fallback.
+### 2. Add dynamic stability ✓ DONE
+- Dutch-roll damping ratio and phugoid damping ratio are computed per design.
+- Strip-theory Cn_β (weathercock from LE sweep) and Cn_r (yaw rate damping); phugoid via Lanchester.
+- Yaw inertia Izz computed from structural strips + point masses in massprops.
+- Both metrics reported in pareto.csv. Opt-in cv gate via dynamic_stab_penalty, dutch_roll_zeta_min, phugoid_zeta_min (all default 0 = report-only, no feasibility impact).
+- Calibration knobs: cn_beta_scale, cn_r_scale.
 
-### Milestone 5 — High-α & nonlinear stability ✅ (done)
-`x_np_high` (neutral-point at high α, the pitch-up gate) and `tip_stall` (tips-before-root
-watchdog) are now physical outputs of a real high-α panel solve instead of a sweep/washout
-heuristic. After `stability::trim()` converges, it runs one extra capped `panel::solve()` at
-`high_alpha_deg` (default 12°): each strip's sweep-normal `cl` is capped at its NeuralFoil
-`cl_max`; the capped-load centroid replaces the load-weighted `x_np`; tip-stall fires when
-tips are capped before the root. The warm frozen-wake AIC is reused, so the extra solve costs
-one back-substitution + one strip loop — negligible vs the ~256 ms cold AIC. VLM fallback
-model retains the analytic heuristic (it has no strip `cl_max`).
+### 3. Expand geometry
+- Add curved planform controls and/or more than two spanwise airfoil sections.
+- Acceptance: genome, seed generation, decode, lofting, and tests cover the extra freedom.
 
-### Milestone 6 — Full control & hardware constraints ✅ (done)
-`mode` gene is now live: **Elevon** (one shared pitch/roll surface, 20%–100% span) vs
-**Split** (inboard elevator + outboard ailerons, split at `ail_span_frac`). Two new design
-variables (`cs_chord_frac`, `ail_span_frac`) make control-surface geometry a GA trade-off.
-- **Roll authority** (`src/control.cpp`): strip-theory Cl_δa + Cl_p → steady helix
-  `pb/2V = −Cl_da·da_eff / Cl_p` (4:1 differential). Gated against `roll_helix_min`.
-- **Hinge moments**: Glauert thin-airfoil Ch_α/Ch_δ (replaces `0.45|δ|+0.05|α|` heuristic);
-  worst-case = pitch trim + full roll throw (elevon) or `max(pitch, roll)` (split).
-- **Hardware keep-outs**: motor-can at 80% root chord + avionics block at 35% span/30%
-  chord, checked against section half-thickness — breaches penalized in cv.
-- Control model centralized in `src/control.cpp` (was duplicated in both aero backends).
-
-### Milestone 7 — UX & analysis
-- Pareto-front visualization (export to a plotting-friendly format / small viewer).
-- Resume/restart from a saved population; checkpointing.
-- Sensitivity / trade-study mode (sweep one variable, hold the rest).
-- Optional STL/STEP export of the knee design for printing.
-
-### Backlog / ideas
-- Eigen-accelerated AIC solve once panel counts grow.
-- Multi-point optimization (climb + cruise) instead of single cruise point.
-- Manufacturing constraints (min wall, overhang) folded into the mass model.
-- Battery/CG as an inner solve targeting mid-band SM instead of a free gene.
-- **Beyond NeuralFoil:** the offline XFOIL table + interpolation is now superseded by the
-  in-process NeuralFoil engine. If a *self-built* surrogate is ever revisited (e.g. to fit
-  bespoke geometry families NeuralFoil was not trained on), the right tool is **Kriging /
-  Gaussian-process regression with EGO active sampling** — it places new XFOIL runs where the
-  model is most uncertain rather than on a fixed Latin-Hypercube grid, and yields a smooth,
-  differentiable response with calibrated error bars (a strict upgrade over thin-plate RBF or
-  inverse-distance interpolation over a sparse table).
+### 4. Improve UX and analysis
+- Add Pareto visualization.
+- Add checkpoint/restart.
+- Add sensitivity sweeps and export helpers.
+- Acceptance: runs can be resumed and inspected without hand-editing CSVs.
 
 ---
 
 ## Equations reference
 
-Quick index of the core relations (see the cited source for context):
+Quick index of the core relations:
 
 | Quantity | Expression | Source |
 |----------|------------|--------|
-| CST surface | `y = x^N1(1−x)^N2 · Σ wᵢ Bᵢ(x) ± x·te/2` | `geom.cpp` |
-| 3D lift slope | `a = a0 / (1 + a0/(π e AR))` | `aero_potential.cpp` |
-| Induced drag | `CDi = CL² / (π e AR)` | `aero_potential.cpp` |
-| Section drag polar | `cd = cd0 + k·cl²` (clamped to `cl_min..cl_max`) | `aero_viscous.cpp` |
-| Sweep-normal query | `Re = ρ V cosΛ c / μ`, `cl_n = cl/cos²Λ` | `aero_potential.cpp` |
-| Static margin | `SM = (x_np − x_cg) / MAC` | `aero_potential.cpp` |
-| Pitch moment | `Cm = cm_ac + CL(x_cg−x_np)/MAC + Cm_δ δ − Cm_thrust` | `aero_potential.cpp` |
-| Trim | solve `CL = W/(qS)`, `Cm = 0` for `(α, δ_e)` (Newton) | `stability.cpp` |
-| Required CL | `CL_req = W / (½ ρ V² S)` | `stability.cpp` |
+| CST surface | y = x^N1(1-x)^N2 * sum(w_i B_i(x)) +/- x*te/2 | geom.cpp |
+| Induced drag | CDi = CL^2 / (pi e AR) | aero_potential.cpp |
+| Section drag polar | cd = cd0 + k*cl^2, clamped to cl_min..cl_max | aero_viscous.cpp |
+| Static margin | SM = (x_np - x_cg) / MAC | aero_potential.cpp |
+| Trim | solve CL = W/(qS), Cm = 0 for alpha and delta_e | stability.cpp |
+| Required CL | CL_req = W / (0.5 rho V^2 S) | stability.cpp |
 
 ---
 
-*AeroAnalyzer Pro — Milestone 4 (NeuralFoil viscous engine is the default; Morino panel solver is the 3D model of record).
-Contributions/edits welcome; keep the test gates green and `build*.ps1` ASCII-only.*
+AeroAnalyzer Pro - panel solver as model of record, NeuralFoil as the default viscous backend. Keep the tests green and treat the ordered backlog above as the source of truth for remaining work.

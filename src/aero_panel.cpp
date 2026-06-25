@@ -734,6 +734,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.cl_local.assign(w.stations.size(), 0.0);
     double CDp_num = 0.0;
     bool tip_stall = false;
+    double min_conf = 1.0;
 
     // Post-stall cap (M5): gate on cfg flag; accumulates capped-load centroid for x_np_high
     // ponytail: flag set by stability::trim() high-alpha pass only; zero cost on normal cruise solve
@@ -765,6 +766,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
             shape.push_back(0.5 * (afA.wl[j] + afB.wl[j]));
         double te_strip = 0.5 * (afA.te_thick + afB.te_thick);
         viscous::Polar pol = surr.query(shape, cl_norm, Re, te_strip);
+        min_conf = std::min(min_conf, pol.confidence);
 
         // Accumulate capped-load centroid for the post-stall NP (M5 high-alpha pass)
         if (post_stall_cap && chord > 0) {
@@ -795,6 +797,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.CDp = (Shalf > 0) ? CDp_num / Shalf : 0.0;
     st.CD  = st.CDi + st.CDp;
     st.tip_stall = tip_stall;
+    st.polar_confidence = min_conf;
     // adverse yaw only on the cruise solve; the high-alpha pass discards it.
     if (!post_stall_cap)
         st.cn_da = control::adverse_yaw_cn_da(w, mp, surr, st.cl_local, a_ref, cfg);

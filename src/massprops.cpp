@@ -51,6 +51,10 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     double vol_half = 0.0;     // m^3 (one half)
     double struct_m = 0.0;     // kg (one half)
     double struct_mx = 0.0;    // kg*m
+    // strip cache for Izz (computed after x_cg is known)
+    struct StripMass { double dm, x_cen, y; };
+    std::vector<StripMass> strips;
+    strips.reserve(w.stations.size());
     for (const auto& s : w.stations) {
         double t = (w.semi_span > 0) ? s.y / w.semi_span : 0.0;
         double A_hat = section_area_hat(s.af);       // chord=1 area, lofted section
@@ -66,6 +70,7 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
         vol_half  += dvol;
         struct_m  += dm;
         struct_mx += dm * x_centroid;
+        strips.push_back({dm, x_centroid, s.y});
     }
     mp.volume = 2.0 * vol_half;
 
@@ -95,6 +100,25 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
 
     mp.mass = m_struct_full + m_pts;
     mp.x_cg = (mp.mass > 0) ? (mx_struct_full + mx_pts) / mp.mass : 0.0;
+
+    // ---- yaw inertia Izz about CG (for Dutch-roll approximation) -----------
+    // Structural strips: each half-station at ±y contributes factor 2.
+    double Izz = 0.0;
+    for (const auto& sm : strips) {
+        double dx = sm.x_cen - mp.x_cg;
+        Izz += 2.0 * sm.dm * (dx * dx + sm.y * sm.y);
+    }
+    // Point masses (motor + battery at CL; servos at ±y_srv).
+    auto addIzz = [&](double m, double x, double y_pm) {
+        double dx = x - mp.x_cg;
+        Izz += m * (dx * dx + y_pm * y_pm);
+    };
+    addIzz(m_motor, x_motor, 0.0);                        // centerline
+    addIzz(m_batt,  x_batt,  0.0);                        // centerline
+    addIzz(m_avi,   x_avi,   0.0);                        // ponytail: avi at y=0; lift if avi goes off-axis
+    addIzz(m_srv, x_srv,  t_srv * w.semi_span);           // right servo
+    addIzz(m_srv, x_srv, -t_srv * w.semi_span);           // left servo
+    mp.Izz = Izz;
 
     // ---- analytic spar clearance (plan §4) ----
     // clearance = local half-thickness at the spar's chordwise station - radius.

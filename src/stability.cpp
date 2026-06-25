@@ -1,5 +1,6 @@
 #include "aeroanalyzer/stability.h"
 #include "aeroanalyzer/aero_potential.h"
+#include "aeroanalyzer/control.h"
 #include <cmath>
 #include <algorithm>
 
@@ -91,6 +92,7 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
         cfgRx.set("panel_freeze_wake", "0");   // live wake for the realignment
         AeroState rx = potential::solve(w, mp, surr, cfgRx, alpha, delta);
         st.e = rx.e; st.CDi = rx.CDi; st.CD = rx.CD;
+        st.polar_confidence = std::min(st.polar_confidence, rx.polar_confidence);
     }
 
     // ---- High-alpha capped solve: physical NP migration and tip-stall (M5) -
@@ -103,7 +105,38 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
         AeroState hi = potential::solve(w, mp, surr, cfgHi, aHi, delta);
         st.x_np_high = hi.x_np;        // capped-load centroid at high alpha
         st.tip_stall = hi.tip_stall;   // tips-before-root stall
+        st.polar_confidence = std::min(st.polar_confidence, hi.polar_confidence);
     }
+
+    // ---- Dynamic stability: Dutch-roll + phugoid (single-DOF / Lanchester) -
+    // ponytail: single-DOF yaw oscillator; ignores roll coupling (Cl_beta/dihedral).
+    // Upgrade to 2-DOF lateral state matrix (Ixx, Ixz, Cl_beta) if coupling matters.
+    {
+        auto ld = control::lateral_derivs(w, mp, st.CL, st.CD, cfg);
+        st.cn_beta = ld.cn_beta;
+        st.cn_r    = ld.cn_r;
+
+        // Dutch-roll: single-DOF yaw oscillator
+        //   omega_dr^2 = (q*S*b / Izz) * Cn_beta,  q = 0.5*rho*V^2
+        //   2*zeta*omega = -(q*S*b^2 / (2V*Izz)) * Cn_r
+        if (mp.Izz > 0.0 && ld.cn_beta > 0.0) {
+            const double q = 0.5 * RHO * V * V;
+            double omega2 = q * mp.S_ref * mp.b_full / mp.Izz * ld.cn_beta;
+            st.dutch_roll_omega = std::sqrt(omega2);
+            double two_zeta_om  = -(q * mp.S_ref * mp.b_full * mp.b_full)
+                                   / (2.0 * V * mp.Izz) * ld.cn_r;
+            st.dutch_roll_zeta  = (st.dutch_roll_omega > 1e-9)
+                ? two_zeta_om / (2.0 * st.dutch_roll_omega) : 0.0;
+        } else {
+            // Cn_beta <= 0 => directionally divergent; sentinel for the gate
+            st.dutch_roll_omega = 0.0;
+            st.dutch_roll_zeta  = (ld.cn_beta <= 0.0) ? -1.0 : 0.0;
+        }
+
+        // Phugoid: Lanchester approximation  zeta_ph = CD / (sqrt(2) * CL)
+        st.phugoid_zeta = (st.CL > 1e-9) ? st.CD / (std::sqrt(2.0) * st.CL) : 0.0;
+    }
+
     return st;
 }
 

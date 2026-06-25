@@ -1,0 +1,7 @@
+load out/knee.avl
+oper
+a a 2.0
+x
+st
+out/knee_st.txt
+q

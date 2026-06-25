@@ -1,0 +1,22 @@
+load out/knee.avl
+oper
+a a 2.0
+x
+st
+out/knee_st.txt
+
+load out/min_drag.avl
+oper
+a a 2.0
+x
+st
+out/min_drag_st.txt
+
+load out/min_mass.avl
+oper
+a a 2.0
+x
+st
+out/min_mass_st.txt
+
+quit

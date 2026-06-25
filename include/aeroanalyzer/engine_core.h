@@ -75,6 +75,7 @@ struct MassProps {
     double volume   = 0.0;  // structural volume (shell+infill), m^3
     double spar_clearance = 1.0;  // min spar-to-OML clearance, m (neg = breach)
     double hw_clearance   = 1.0;  // min hardware-to-OML clearance, m (neg = breach)
+    double Izz            = 0.0;  // yaw moment of inertia about CG, kg*m^2
 };
 
 // ---- aerodynamic operating-point result ---------------------------------
@@ -91,6 +92,12 @@ struct AeroState {
     double cl_p  = 0.0;          // roll damping derivative, per (pb/2V)
     double roll_helix = 0.0;     // steady roll helix pb/2V at max diff. deflection
     double cn_da = 0.0;          // aileron yaw derivative; >0 = adverse yaw
+    double cn_beta = 0.0;        // weathercock stability, per rad (>0 = stable)
+    double cn_r    = 0.0;        // yaw rate damping, per (rb/2V) (<0 = damped)
+    double dutch_roll_zeta  = 0.0; // Dutch-roll damping ratio (<0 = divergent)
+    double dutch_roll_omega = 0.0; // Dutch-roll natural frequency, rad/s
+    double phugoid_zeta     = 0.0; // phugoid damping ratio (Lanchester)
+    double polar_confidence = 1.0; // minimum section-polar confidence seen
     std::vector<double> cl_local;  // per-station local lift coefficient
     bool tip_stall = false;
     bool trimmed = false;     // did the trim solve converge?
