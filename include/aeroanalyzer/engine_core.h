@@ -54,8 +54,9 @@ struct WingGeometry {
     double tip_chord  = 0.13;  // m
     double le_sweep   = 0.0;   // rad (leading-edge sweep)
     double washout    = 0.0;   // rad (tip twist, negative = washout)
-    Airfoil section;           // root section shape (scaled per station)
-    Airfoil section_tip;       // tip section shape; loft() blends root->tip
+    double le_bow     = 0.0;   // LE parabolic bow amplitude, m
+    double te_bow     = 0.0;   // TE chord augmentation bow, m
+    std::vector<Airfoil> sections;  // K control sections; loft() blends piecewise
     ControlMode mode = ControlMode::Elevon;
     double battery_x     = 0.05;  // battery-box CG x location, m (CG trim handle)
     double cs_chord_frac = 0.25;  // control-surface chord fraction [0.15, 0.35]

@@ -13,33 +13,35 @@ GenomeSpec default_genome() {
     auto set = [&](int i, const char* nm, double lo, double hi) {
         g.names[i] = nm; g.lo[i] = lo; g.hi[i] = hi;
     };
-    set(G_ROOT,     "root_chord_m", 0.18, 0.35);
-    set(G_TAPER,    "taper_ratio",  0.30, 0.90);
-    set(G_SEMISPAN, "semi_span_m",  0.45, 0.80);
-    set(G_SWEEP,    "le_sweep_deg",  8.0, 30.0);
-    set(G_WASHOUT,  "washout_deg",  -6.0,  0.0);
+    set(G_ROOT,     "root_chord_m",  0.18, 0.35);
+    set(G_TAPER,    "taper_ratio",   0.30, 0.90);
+    set(G_SEMISPAN, "semi_span_m",   0.45, 0.80);
+    set(G_SWEEP,    "le_sweep_deg",   8.0, 30.0);
+    set(G_WASHOUT,  "washout_deg",   -6.0,  0.0);
     set(G_BATTERY,  "battery_x_m",   0.00, 0.22);
-    set(G_WU0, "wu0", 0.10, 0.34);
-    set(G_WU1, "wu1", 0.10, 0.34);
-    set(G_WU2, "wu2", 0.08, 0.30);
-    set(G_WU3, "wu3", 0.06, 0.26);
-    set(G_WL0, "wl0", -0.22, 0.05);
-    set(G_WL1, "wl1", -0.20, 0.08);
-    set(G_WL2, "wl2", -0.15, 0.15);
-    set(G_WL3, "wl3", -0.05, 0.20);   // aft lower weight drives reflex
     set(G_TE,       "te_frac",       0.002, 0.010);
     set(G_MODE,     "mode",          0.0,   1.0);
     set(G_CS_CHORD, "cs_chord_frac", 0.15,  0.35);
     set(G_AIL_SPAN, "ail_span_frac", 0.40,  0.80);
-    // tip section mirrors the root bounds; loft() interpolates root->tip.
-    set(G_TIP_WU0, "tip_wu0", 0.10, 0.34);
-    set(G_TIP_WU1, "tip_wu1", 0.10, 0.34);
-    set(G_TIP_WU2, "tip_wu2", 0.08, 0.30);
-    set(G_TIP_WU3, "tip_wu3", 0.06, 0.26);
-    set(G_TIP_WL0, "tip_wl0", -0.22, 0.05);
-    set(G_TIP_WL1, "tip_wl1", -0.20, 0.08);
-    set(G_TIP_WL2, "tip_wl2", -0.15, 0.15);
-    set(G_TIP_WL3, "tip_wl3", -0.05, 0.20);
+    set(G_LE_BOW,   "le_bow_m",     -0.05,  0.05);
+    set(G_TE_BOW,   "te_bow_m",     -0.05,  0.05);
+    // CST bounds identical for every section; aft lower weight drives reflex.
+    const double ulo[] = {0.10, 0.10, 0.08, 0.06};
+    const double uhi[] = {0.34, 0.34, 0.30, 0.26};
+    const double llo[] = {-0.22, -0.20, -0.15, -0.05};
+    const double lhi[] = {0.05,   0.08,  0.15,  0.20};
+    const char* pfx[]  = {"s0", "s1", "s2", "s3", "s4"};
+    const char* usuf[] = {"_wu0","_wu1","_wu2","_wu3"};
+    const char* lsuf[] = {"_wl0","_wl1","_wl2","_wl3"};
+    for (int k = 0; k < N_SECTIONS; ++k) {
+        for (int i = 0; i < 4; ++i) {
+            char nm[16];
+            std::snprintf(nm, sizeof(nm), "%s%s", pfx[k], usuf[i]);
+            set(G_SEC(k, 0, i), nm, ulo[i], uhi[i]);
+            std::snprintf(nm, sizeof(nm), "%s%s", pfx[k], lsuf[i]);
+            set(G_SEC(k, 1, i), nm, llo[i], lhi[i]);
+        }
+    }
     return g;
 }
 
@@ -152,56 +154,82 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec) {
         return v;
     };
     WingGeometry w;
-    w.root_chord = clamp(G_ROOT);
-    w.tip_chord  = w.root_chord * clamp(G_TAPER);
-    w.semi_span  = clamp(G_SEMISPAN);
-    w.le_sweep   = clamp(G_SWEEP) * DEG2RAD;
-    w.washout    = clamp(G_WASHOUT) * DEG2RAD;
-    w.battery_x  = clamp(G_BATTERY);
-    w.section.wu = {clamp(G_WU0), clamp(G_WU1), clamp(G_WU2), clamp(G_WU3)};
-    w.section.wl = {clamp(G_WL0), clamp(G_WL1), clamp(G_WL2), clamp(G_WL3)};
-    w.section.te_thick = clamp(G_TE);
-    w.section_tip.wu = {clamp(G_TIP_WU0), clamp(G_TIP_WU1), clamp(G_TIP_WU2), clamp(G_TIP_WU3)};
-    w.section_tip.wl = {clamp(G_TIP_WL0), clamp(G_TIP_WL1), clamp(G_TIP_WL2), clamp(G_TIP_WL3)};
-    w.section_tip.te_thick = w.section.te_thick;  // evaluate() may override w/ te_thick_tip_frac
-    w.mode           = (clamp(G_MODE) < 0.5) ? ControlMode::Elevon : ControlMode::Split;
-    w.cs_chord_frac  = clamp(G_CS_CHORD);
-    w.ail_span_frac  = clamp(G_AIL_SPAN);
+    w.root_chord    = clamp(G_ROOT);
+    w.tip_chord     = w.root_chord * clamp(G_TAPER);
+    w.semi_span     = clamp(G_SEMISPAN);
+    w.le_sweep      = clamp(G_SWEEP) * DEG2RAD;
+    w.washout       = clamp(G_WASHOUT) * DEG2RAD;
+    w.battery_x     = clamp(G_BATTERY);
+    w.mode          = (clamp(G_MODE) < 0.5) ? ControlMode::Elevon : ControlMode::Split;
+    w.cs_chord_frac = clamp(G_CS_CHORD);
+    w.ail_span_frac = clamp(G_AIL_SPAN);
+    w.le_bow        = clamp(G_LE_BOW);
+    w.te_bow        = clamp(G_TE_BOW);
+    double te = clamp(G_TE);
+    w.sections.resize(N_SECTIONS);
+    for (int k = 0; k < N_SECTIONS; ++k) {
+        w.sections[k].wu = {clamp(G_SEC(k,0,0)), clamp(G_SEC(k,0,1)),
+                            clamp(G_SEC(k,0,2)), clamp(G_SEC(k,0,3))};
+        w.sections[k].wl = {clamp(G_SEC(k,1,0)), clamp(G_SEC(k,1,1)),
+                            clamp(G_SEC(k,1,2)), clamp(G_SEC(k,1,3))};
+        w.sections[k].te_thick = te;
+    }
     return w;
 }
 
 void loft(WingGeometry& w, int n) {
     if (n < 2) n = 2;
     w.stations.assign(n, Station{});
-    // Tip section blends to root when unset (most scratch/test callers only
-    // set w.section); decode() populates section_tip for the optimizer.
-    const Airfoil& root = w.section;
-    const Airfoil& tip  = w.section_tip.wu.empty() ? w.section : w.section_tip;
+    if (w.sections.empty()) w.sections.resize(1);
+    const int K = (int)w.sections.size();
+    // η breakpoints: canonical 5-section table when K==5; linear spacing otherwise.
+    std::vector<double> ETA(K);
+    if (K == N_SECTIONS) {
+        for (int k = 0; k < K; ++k) ETA[k] = SECTION_ETA[k];
+    } else {
+        for (int k = 0; k < K; ++k) ETA[k] = (K > 1) ? double(k) / (K - 1) : 0.0;
+    }
+    const double b = w.semi_span;
     std::vector<double> y(n);
     for (int i = 0; i < n; ++i) {
         double th = PI * i / (n - 1);
-        y[i] = w.semi_span * 0.5 * (1.0 - std::cos(th));  // cluster root & tip
+        y[i] = b * 0.5 * (1.0 - std::cos(th));
     }
     for (int i = 0; i < n; ++i) {
-        double t = (w.semi_span > 0) ? y[i] / w.semi_span : 0.0;  // 0 root .. 1 tip
+        double t = (b > 0) ? y[i] / b : 0.0;
         Station s;
         s.y = y[i];
         s.chord = w.root_chord + (w.tip_chord - w.root_chord) * t;
-        s.x_le  = y[i] * std::tan(w.le_sweep);            // sheared sweep
+        // LE bow: parabolic deviation from sheared sweep
+        double bow_u = 4.0 * t * (1.0 - t);
+        s.x_le  = y[i] * std::tan(w.le_sweep) + w.le_bow * bow_u;
+        s.chord += w.te_bow * bow_u;   // te_bow augments effective chord
         s.twist = w.washout * t;
         s.z = 0.0;
-        // lofted section: linear blend of root/tip CST weights + TE thickness.
-        s.af.N1 = root.N1; s.af.N2 = root.N2;
-        s.af.wu.resize(root.wu.size());
-        s.af.wl.resize(root.wl.size());
-        for (std::size_t j = 0; j < root.wu.size(); ++j)
-            s.af.wu[j] = (1.0 - t) * root.wu[j] + t * tip.wu[j];
-        for (std::size_t j = 0; j < root.wl.size(); ++j)
-            s.af.wl[j] = (1.0 - t) * root.wl[j] + t * tip.wl[j];
-        s.af.te_thick = (1.0 - t) * root.te_thick + t * tip.te_thick;
-        // strip width via midpoints (trapezoidal control volumes)
-        double y_lo = (i == 0) ? y[0] : 0.5 * (y[i - 1] + y[i]);
-        double y_hi = (i == n - 1) ? y[n - 1] : 0.5 * (y[i] + y[i + 1]);
+        // piecewise linear blend between K control sections
+        int seg = K - 2;
+        for (int k = 0; k < K - 1; ++k)
+            if (ETA[k + 1] >= t) { seg = k; break; }
+        if (seg < 0) seg = 0;
+        if (K > 1 && seg > K - 2) seg = K - 2;
+        double tl = (ETA[seg+1] > ETA[seg])
+                    ? (t - ETA[seg]) / (ETA[seg+1] - ETA[seg]) : 0.0;
+        if (tl < 0.0) tl = 0.0;
+        if (tl > 1.0) tl = 1.0;
+        const Airfoil& a0 = w.sections[seg];
+        const Airfoil& a1 = (K > 1) ? w.sections[seg + 1] : a0;
+        std::size_t nw = std::max(a0.wu.size(), a1.wu.size());
+        s.af.N1 = a0.N1; s.af.N2 = a0.N2;
+        s.af.wu.resize(nw); s.af.wl.resize(nw);
+        for (std::size_t j = 0; j < nw; ++j) {
+            s.af.wu[j] = (1.0-tl) * (j < a0.wu.size() ? a0.wu[j] : 0.0)
+                        + tl      * (j < a1.wu.size() ? a1.wu[j] : 0.0);
+            s.af.wl[j] = (1.0-tl) * (j < a0.wl.size() ? a0.wl[j] : 0.0)
+                        + tl      * (j < a1.wl.size() ? a1.wl[j] : 0.0);
+        }
+        s.af.te_thick = (1.0-tl) * a0.te_thick + tl * a1.te_thick;
+        double y_lo = (i == 0)     ? y[0]     : 0.5 * (y[i-1] + y[i]);
+        double y_hi = (i == n - 1) ? y[n - 1] : 0.5 * (y[i]   + y[i+1]);
         s.width = y_hi - y_lo;
         w.stations[i] = s;
     }

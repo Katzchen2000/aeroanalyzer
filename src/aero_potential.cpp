@@ -132,12 +132,12 @@ std::uint64_t geom_signature(const WingGeometry& w) {
         h = (h ^ b) * 1099511628211ull;        // FNV-1a prime
     };
     mix(w.root_chord); mix(w.tip_chord); mix(w.semi_span);
-    mix(w.le_sweep);   mix(w.washout);   mix(w.section.te_thick);
-    for (double v : w.section.wu) mix(v);
-    for (double v : w.section.wl) mix(v);
-    mix(w.section_tip.te_thick);
-    for (double v : w.section_tip.wu) mix(v);
-    for (double v : w.section_tip.wl) mix(v);
+    mix(w.le_sweep); mix(w.washout); mix(w.le_bow); mix(w.te_bow);
+    for (const auto& sec : w.sections) {
+        mix(sec.te_thick);
+        for (double v : sec.wu) mix(v);
+        for (double v : sec.wl) mix(v);
+    }
     mix(static_cast<double>(w.stations.size()));
     for (const auto& s : w.stations) { mix(s.y); mix(s.chord); mix(s.x_le); mix(s.twist); }
     return h;
@@ -224,7 +224,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.delta_e = delta_e;
 
     // Section aerodynamics from thin-airfoil theory (camber line integration)
-    geom::ThinAirfoil ta = geom::thin_airfoil(w.section);
+    geom::ThinAirfoil ta = geom::thin_airfoil(w.sections.empty() ? Airfoil{} : w.sections[0]);
 
     // Prandtl 3-D correction for control-derivative reference slope
     const double AR    = mp.AR;

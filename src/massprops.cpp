@@ -164,16 +164,16 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     // checks. Use the lofted station section if avionics placement gets tuned.
     // Motor at root TE: check half-thickness at 80% chord >= motor radius.
     double motor_r   = 0.5 * cfg.getd("motor_diameter", 0.028);
-    double half_t_mot = 0.5 * (geom::cst_upper(w.section, 0.80)
-                               - geom::cst_lower(w.section, 0.80)) * w.root_chord;
+    double half_t_mot = 0.5 * (geom::cst_upper(w.sections[0], 0.80)
+                               - geom::cst_lower(w.sections[0], 0.80)) * w.root_chord;
     double mot_clear = half_t_mot - motor_r;
 
     // Avionics block at t=0.35, 30% chord: check half-thickness >= avionics_half_h.
     double avi_hh    = cfg.getd("avionics_half_h", 0.012);
     double t_avi_hw  = 0.35;
     double chord_avi = w.root_chord + (w.tip_chord - w.root_chord) * t_avi_hw;
-    double half_t_avi = 0.5 * (geom::cst_upper(w.section, 0.30)
-                                - geom::cst_lower(w.section, 0.30)) * chord_avi;
+    double half_t_avi = 0.5 * (geom::cst_upper(w.sections[0], 0.30)
+                                - geom::cst_lower(w.sections[0], 0.30)) * chord_avi;
     double avi_clear = half_t_avi - avi_hh;
 
     mp.hw_clearance = std::min(mot_clear, avi_clear);

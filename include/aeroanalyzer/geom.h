@@ -10,23 +10,32 @@ namespace aero {
 namespace geom {
 
 // Design-variable layout. Order matters — keep in sync with decode().
-enum Gene {
-    G_ROOT = 0,   // root chord, m
-    G_TAPER,      // tip/root chord ratio
-    G_SEMISPAN,   // half span, m
-    G_SWEEP,      // leading-edge sweep, deg
-    G_WASHOUT,    // tip twist, deg (negative = washout)
-    G_BATTERY,    // battery-box CG x, m
-    G_WU0, G_WU1, G_WU2, G_WU3,   // root upper CST weights
-    G_WL0, G_WL1, G_WL2, G_WL3,   // root lower CST weights
-    G_TE,         // trailing-edge thickness, fraction of chord
-    G_MODE,       // <0.5 Elevon, else Split
-    G_CS_CHORD,   // control-surface chord fraction [0.15, 0.35]
-    G_AIL_SPAN,   // aileron inboard edge, fraction of semi-span [0.40, 0.80]
-    G_TIP_WU0, G_TIP_WU1, G_TIP_WU2, G_TIP_WU3,   // tip upper CST weights
-    G_TIP_WL0, G_TIP_WL1, G_TIP_WL2, G_TIP_WL3,   // tip lower CST weights
-    N_GENES
-};
+// Planform genes (fixed indices 0-11):
+constexpr int G_ROOT     = 0;   // root chord, m
+constexpr int G_TAPER    = 1;   // tip/root chord ratio
+constexpr int G_SEMISPAN = 2;   // half span, m
+constexpr int G_SWEEP    = 3;   // leading-edge sweep, deg
+constexpr int G_WASHOUT  = 4;   // tip twist, deg (negative = washout)
+constexpr int G_BATTERY  = 5;   // battery-box CG x, m
+constexpr int G_TE       = 6;   // trailing-edge thickness, fraction of chord
+constexpr int G_MODE     = 7;   // <0.5 Elevon, else Split
+constexpr int G_CS_CHORD = 8;   // control-surface chord fraction [0.15, 0.35]
+constexpr int G_AIL_SPAN = 9;   // aileron inboard edge, fraction of semi-span [0.40, 0.80]
+constexpr int G_LE_BOW   = 10;  // LE parabolic bow amplitude, m
+constexpr int G_TE_BOW   = 11;  // TE chord augmentation bow, m
+
+constexpr int N_PLANFORM    = 12;
+constexpr int N_CST_PER_SEC = 8;   // 4 wu + 4 wl per section
+constexpr int N_SECTIONS    = 5;
+constexpr int N_GENES = N_PLANFORM + N_SECTIONS * N_CST_PER_SEC;  // 52
+
+// Canonical η breakpoints for the 5 control sections.
+constexpr double SECTION_ETA[5] = {0.0, 0.5, 0.75, 0.875, 1.0};
+
+// Index of CST weight gene: sec 0..4, wl 0=upper/1=lower, i 0..3
+inline int G_SEC(int sec, int wl, int i) {
+    return N_PLANFORM + sec * N_CST_PER_SEC + wl * 4 + i;
+}
 
 struct GenomeSpec {
     std::vector<double> lo, hi;

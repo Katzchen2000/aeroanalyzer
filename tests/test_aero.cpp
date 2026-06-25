@@ -34,9 +34,10 @@ static WingGeometry demo_wing() {
     WingGeometry w;
     w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
     w.le_sweep = 18.0 * DEG2RAD; w.washout = -3.0 * DEG2RAD;
-    w.section.wu = {0.20, 0.17, 0.14, 0.11};
-    w.section.wl = {-0.12, -0.09, -0.02, 0.06};   // slight reflex
-    w.section.te_thick = 0.004;
+    Airfoil af; af.wu = {0.20, 0.17, 0.14, 0.11};
+    af.wl = {-0.12, -0.09, -0.02, 0.06};   // slight reflex
+    af.te_thick = 0.004;
+    w.sections.assign(1, af);
     w.battery_x = 0.06;
     geom::loft(w, 20);
     return w;
@@ -99,9 +100,10 @@ static WingGeometry rect_wing(double chord, double AR, int nst) {
     w.root_chord = chord; w.tip_chord = chord;
     w.semi_span = 0.5 * b_full;
     w.le_sweep = 0.0; w.washout = 0.0;
-    w.section.wu = { 0.12, 0.12, 0.12, 0.12};   // symmetric -> alpha_L0 ~ 0
-    w.section.wl = {-0.12,-0.12,-0.12,-0.12};
-    w.section.te_thick = 0.002;
+    Airfoil af; af.wu = { 0.12, 0.12, 0.12, 0.12};  // symmetric -> alpha_L0 ~ 0
+    af.wl = {-0.12,-0.12,-0.12,-0.12};
+    af.te_thick = 0.002;
+    w.sections.assign(1, af);
     w.battery_x = 0.05;
     geom::loft(w, nst);
     return w;
@@ -562,8 +564,8 @@ TEST(hw_keepout_fires_and_clears) {
     Config cfg;
     // Flat plate (near-zero thickness): motor can't fit.
     WingGeometry w_thin = demo_wing();
-    w_thin.section.wu = {0.01, 0.01, 0.01, 0.01};
-    w_thin.section.wl = {-0.01, -0.01, -0.01, -0.01};
+    w_thin.sections[0].wu = {0.01, 0.01, 0.01, 0.01};
+    w_thin.sections[0].wl = {-0.01, -0.01, -0.01, -0.01};
     geom::loft(w_thin, 20);
     cfg.set("motor_diameter", "0.028");
     cfg.set("avionics_half_h", "0.012");

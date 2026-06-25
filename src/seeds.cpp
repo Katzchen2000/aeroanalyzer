@@ -74,11 +74,11 @@ void widen_cst_bounds(geom::GenomeSpec& spec, const SeedSet& s, double margin) {
     };
     using namespace geom;
     for (const auto& f : s.airfoils) {
-        for (int i = 0; i < 4 && i < (int)f.wu.size(); ++i) {
-            widen(G_WU0 + i, f.wu[i]);  widen(G_TIP_WU0 + i, f.wu[i]);
-        }
-        for (int i = 0; i < 4 && i < (int)f.wl.size(); ++i) {
-            widen(G_WL0 + i, f.wl[i]);  widen(G_TIP_WL0 + i, f.wl[i]);
+        for (int k = 0; k < N_SECTIONS; ++k) {
+            for (int i = 0; i < 4 && i < (int)f.wu.size(); ++i)
+                widen(G_SEC(k, 0, i), f.wu[i]);
+            for (int i = 0; i < 4 && i < (int)f.wl.size(); ++i)
+                widen(G_SEC(k, 1, i), f.wl[i]);
         }
         widen(G_TE, f.te_thick);
     }
@@ -108,8 +108,9 @@ std::vector<std::vector<double>> build_seed_genomes(
         for (int gi = 0; gi < n; ++gi)
             x[gi] = spec.lo[gi] + u(g) * (spec.hi[gi] - spec.lo[gi]);  // explorer base
 
-        // overlay the seed airfoil's CST shape; hybrids jitter it around the seed
-        // so the seeded half doesn't stack onto only |seeds| distinct airfoils.
+        // overlay seed airfoil CST into all K sections.
+        // elites: all sections identical (uniform loft); hybrids: each jittered
+        // independently so the seeded pop carries real spanwise diversity from gen 0.
         const Airfoil& af = s.airfoils[k % s.airfoils.size()];
         bool elite = (k < n_elite);
         auto put = [&](int gi, double base) {
@@ -118,13 +119,13 @@ std::vector<std::vector<double>> build_seed_genomes(
                 v += cst_jitter * (spec.hi[gi] - spec.lo[gi]) * (u(g) - 0.5);
             x[gi] = clampg(gi, v);
         };
-        for (int i = 0; i < 4 && i < (int)af.wu.size(); ++i) put(G_WU0 + i, af.wu[i]);
-        for (int i = 0; i < 4 && i < (int)af.wl.size(); ++i) put(G_WL0 + i, af.wl[i]);
         put(G_TE, af.te_thick);
-        // tip section: elites duplicate the root; hybrids jitter independently,
-        // giving real root!=tip spanwise variation in the seeded population.
-        for (int i = 0; i < 4 && i < (int)af.wu.size(); ++i) put(G_TIP_WU0 + i, af.wu[i]);
-        for (int i = 0; i < 4 && i < (int)af.wl.size(); ++i) put(G_TIP_WL0 + i, af.wl[i]);
+        for (int sec = 0; sec < N_SECTIONS; ++sec) {
+            for (int i = 0; i < 4 && i < (int)af.wu.size(); ++i)
+                put(G_SEC(sec, 0, i), af.wu[i]);
+            for (int i = 0; i < 4 && i < (int)af.wl.size(); ++i)
+                put(G_SEC(sec, 1, i), af.wl[i]);
+        }
 
         // elites: settle planform at mid-box; hybrids keep the random planform
         if (elite)

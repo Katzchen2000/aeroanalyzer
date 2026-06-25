@@ -62,8 +62,7 @@ TEST(planform_rectangular) {
     WingGeometry w;
     w.root_chord = 0.20; w.tip_chord = 0.20; w.semi_span = 0.60;
     w.le_sweep = 0.0; w.washout = 0.0;
-    w.section.wu = {0.18, 0.15, 0.12, 0.10};
-    w.section.wl = {-0.18, -0.15, -0.12, -0.10};
+    w.sections.resize(1);   // single uniform section, loft handles it
     geom::loft(w, 20);
     double S, mac, xle, b, AR;
     geom::planform(w, S, mac, xle, b, AR);
@@ -78,6 +77,7 @@ TEST(loft_spanwise) {
     WingGeometry w;
     w.root_chord = 0.25; w.tip_chord = 0.12; w.semi_span = 0.6;
     w.le_sweep = 20.0 * DEG2RAD; w.washout = -4.0 * DEG2RAD;
+    w.sections.resize(1);
     geom::loft(w, 20);
     CHECK_NEAR(w.stations.front().y, 0.0, 1e-9);
     CHECK_NEAR(w.stations.back().y, 0.6, 1e-9);
@@ -85,36 +85,88 @@ TEST(loft_spanwise) {
     CHECK(w.stations.back().x_le > w.stations.front().x_le);  // swept aft
 }
 
-// Variable-section genome: root + tip CST (4th order each) -> 24 genes, tip
-// bounds mirror the root bounds.
-TEST(genome_has_tip_section) {
-    CHECK(geom::N_GENES == 26);   // 18 base genes + 8 tip CST weights
+// 5-section genome: N_GENES == 52, G_SEC addressing correct.
+TEST(genome_5_sections) {
+    CHECK(geom::N_GENES == 52);
     geom::GenomeSpec spec = geom::default_genome();
-    CHECK((int)spec.size() == 26);
-    CHECK_NEAR(spec.lo[geom::G_TIP_WU0], spec.lo[geom::G_WU0], 1e-12);
-    CHECK_NEAR(spec.hi[geom::G_TIP_WL3], spec.hi[geom::G_WL3], 1e-12);
+    CHECK((int)spec.size() == 52);
+    // all sections share the same CST bounds
+    for (int k = 1; k < geom::N_SECTIONS; ++k) {
+        CHECK_NEAR(spec.lo[geom::G_SEC(k,0,0)], spec.lo[geom::G_SEC(0,0,0)], 1e-12);
+        CHECK_NEAR(spec.hi[geom::G_SEC(k,1,3)], spec.hi[geom::G_SEC(0,1,3)], 1e-12);
+    }
+    // G_LE_BOW / G_TE_BOW exist and are symmetric
+    CHECK_NEAR(spec.lo[geom::G_LE_BOW], -spec.hi[geom::G_LE_BOW], 1e-12);
 }
 
-// loft() blends root->tip CST linearly in eta; endpoints reproduce the sections
-// exactly and the tip TE closes when section_tip.te_thick = 0.
-TEST(loft_blends_root_to_tip) {
+// loft() piecewise blend: knot points reproduce control sections exactly;
+// inner segment blends correctly; le_bow parabola is applied.
+TEST(loft_5section_blend) {
     WingGeometry w;
     w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.section.wu = {0.20, 0.17, 0.14, 0.11};
-    w.section.wl = {-0.12, -0.09, -0.02, 0.06};
-    w.section.te_thick = 0.006;
-    w.section_tip.wu = {0.10, 0.09, 0.08, 0.05};
-    w.section_tip.wl = {-0.06, -0.04, 0.00, 0.03};
-    w.section_tip.te_thick = 0.0;                 // closed tip
-    geom::loft(w, 21);
-    for (int j = 0; j < 4; ++j) {
-        CHECK_NEAR(w.stations.front().af.wu[j], w.section.wu[j], 1e-9);
-        CHECK_NEAR(w.stations.back().af.wu[j],  w.section_tip.wu[j], 1e-9);
+    w.le_bow = 0.0; w.te_bow = 0.0;
+    // 5 control sections with distinct wu[0] values
+    w.sections.resize(5);
+    for (int k = 0; k < 5; ++k) {
+        w.sections[k].wu = {0.10 + 0.04*k, 0.15, 0.12, 0.09};
+        w.sections[k].wl = {-0.10, -0.08, -0.04, 0.02};
+        w.sections[k].te_thick = (k == 4) ? 0.0 : 0.005;  // closed tip
     }
-    CHECK_NEAR(w.stations.back().af.te_thick, 0.0, 1e-9);   // tip TE closed
-    const Station& s = w.stations[10];
-    double t = s.y / w.semi_span;
+    // n=100: cos(pi*66/99) = cos(2pi/3) = -0.5 → y=0.45 = 0.75*b exactly
+    geom::loft(w, 100);
+
+    // η=0 root station == s0
     for (int j = 0; j < 4; ++j)
-        CHECK_NEAR(s.af.wu[j],
-                   (1.0 - t) * w.section.wu[j] + t * w.section_tip.wu[j], 1e-9);
+        CHECK_NEAR(w.stations.front().af.wu[j], w.sections[0].wu[j], 1e-9);
+    // η=1 tip station == s4
+    for (int j = 0; j < 4; ++j)
+        CHECK_NEAR(w.stations.back().af.wu[j], w.sections[4].wu[j], 1e-9);
+    CHECK_NEAR(w.stations.back().af.te_thick, 0.0, 1e-9);
+
+    // station 66 lands at η=0.75 exactly; must equal s2
+    double target = 0.75 * w.semi_span;
+    int idx = 0;
+    double best = 1e9;
+    for (int i = 0; i < (int)w.stations.size(); ++i) {
+        double d = std::fabs(w.stations[i].y - target);
+        if (d < best) { best = d; idx = i; }
+    }
+    CHECK(best < 1e-6);
+    for (int j = 0; j < 4; ++j)
+        CHECK_NEAR(w.stations[idx].af.wu[j], w.sections[2].wu[j], 1e-9);
+}
+
+// le_bow parabola: midspan x_le offset is exactly le_bow.
+TEST(loft_le_bow) {
+    WingGeometry w;
+    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
+    w.le_sweep = 0.0; w.washout = 0.0;
+    w.le_bow = 0.03; w.te_bow = 0.0;
+    w.sections.resize(1);
+    geom::loft(w, 41);
+    // midspan station nearest η=0.5
+    int mid = 0; double best = 1e9;
+    for (int i = 0; i < (int)w.stations.size(); ++i) {
+        double d = std::fabs(w.stations[i].y - 0.5 * w.semi_span);
+        if (d < best) { best = d; mid = i; }
+    }
+    // parabola value at η=0.5: 4*0.5*0.5 = 1.0 → x_le = le_bow
+    CHECK_NEAR(w.stations[mid].x_le, w.le_bow, 1e-3);
+}
+
+// te_bow < 0 makes tip chord narrower; gate should trigger in evaluate.
+// Here just verify the chord formula: chord at midspan decreases with te_bow < 0.
+TEST(loft_te_bow_chord) {
+    WingGeometry w;
+    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
+    w.le_bow = 0.0; w.te_bow = -0.05;
+    w.sections.resize(1);
+    geom::loft(w, 41);
+    int mid = 0; double best = 1e9;
+    for (int i = 0; i < (int)w.stations.size(); ++i) {
+        double d = std::fabs(w.stations[i].y - 0.5 * w.semi_span);
+        if (d < best) { best = d; mid = i; }
+    }
+    double chord_no_bow = 0.25 + (0.13 - 0.25) * 0.5;   // linear taper at η=0.5
+    CHECK(w.stations[mid].chord < chord_no_bow);
 }

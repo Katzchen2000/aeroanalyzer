@@ -8,9 +8,10 @@ static WingGeometry rect_wing() {
     WingGeometry w;
     w.root_chord = 0.20; w.tip_chord = 0.20; w.semi_span = 0.60;
     w.le_sweep = 0.0; w.washout = 0.0;
-    w.section.wu = {0.18, 0.15, 0.12, 0.10};
-    w.section.wl = {-0.18, -0.15, -0.12, -0.10};
-    w.section.te_thick = 0.0;
+    Airfoil af; af.wu = {0.18, 0.15, 0.12, 0.10};
+    af.wl = {-0.18, -0.15, -0.12, -0.10};
+    af.te_thick = 0.0;
+    w.sections.assign(1, af);
     geom::loft(w, 20);
     return w;
 }
@@ -26,7 +27,7 @@ TEST(volume_solid_matches_closed_form) {
     cfg.set("shell_thickness", "0.0001");
     cfg.set("material_density", "1000");
     MassProps mp = massprops::compute(w, cfg);
-    double A_hat = massprops::section_area_hat(w.section);
+    double A_hat = massprops::section_area_hat(w.sections[0]);
     double expect = 2.0 * A_hat * 0.20 * 0.20 * 0.60;
     CHECK_NEAR(mp.volume, expect, 1e-6);
 }
@@ -60,7 +61,7 @@ TEST(spar_clearance_bounded) {
     WingGeometry w = rect_wing();
     Config cfg;
     MassProps mp = massprops::compute(w, cfg);
-    double half_t_max = 0.5 * (geom::cst_upper(w.section, 0.15) -
-                               geom::cst_lower(w.section, 0.15)) * w.root_chord;
+    double half_t_max = 0.5 * (geom::cst_upper(w.sections[0], 0.15) -
+                               geom::cst_lower(w.sections[0], 0.15)) * w.root_chord;
     CHECK(mp.spar_clearance < half_t_max + 1e-9);
 }

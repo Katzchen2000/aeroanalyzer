@@ -28,8 +28,15 @@ static bool write_dat(const std::string& path, const Airfoil& f) {
 
 bool write_case(const std::string& stem, const WingGeometry& w,
                 const MassProps& mp, const Config& cfg) {
-    std::string dat = stem + ".dat";
-    if (!write_dat(dat, w.section)) return false;
+    const int K = (int)w.sections.size();
+    if (K == 0) return false;
+
+    // Write per-section .dat files
+    const char* sec_label[] = {"root","eta50","eta75","eta875","tip"};
+    for (int k = 0; k < K && k < 5; ++k) {
+        std::string dat = stem + "_s" + std::to_string(k) + "_" + sec_label[k] + ".dat";
+        if (!write_dat(dat, w.sections[k])) return false;
+    }
 
     std::ofstream o(stem + ".avl");
     if (!o) return false;
@@ -49,16 +56,19 @@ bool write_case(const std::string& stem, const WingGeometry& w,
     o << "TRANSLATE\n0.0 0.0 0.0\n";
     o << "ANGLE\n0.0\n#\n";
 
-    // root section
-    o << "SECTION\n";
-    o << "0.0 0.0 0.0 " << w.root_chord << " 0.0\n";
-    o << "AFILE\n" << dat << "\n#\n";
-    // tip section
-    double xle_tip = w.semi_span * std::tan(w.le_sweep);
-    o << "SECTION\n";
-    o << xle_tip << " " << w.semi_span << " 0.0 " << w.tip_chord << " "
-      << (w.washout * RAD2DEG) << "\n";
-    o << "AFILE\n" << dat << "\n#\n";
+    // K SECTION entries using canonical η breakpoints; bow formula for x_le/chord.
+    for (int k = 0; k < K && k < 5; ++k) {
+        double eta = geom::SECTION_ETA[k];
+        double y   = eta * w.semi_span;
+        double bow = 4.0 * eta * (1.0 - eta);
+        double xle = y * std::tan(w.le_sweep) + w.le_bow * bow;
+        double chord = w.root_chord + (w.tip_chord - w.root_chord) * eta + w.te_bow * bow;
+        double twist = w.washout * eta * RAD2DEG;
+        std::string dat = stem + "_s" + std::to_string(k) + "_" + sec_label[k] + ".dat";
+        o << "SECTION\n";
+        o << xle << " " << y << " 0.0 " << chord << " " << twist << "\n";
+        o << "AFILE\n" << dat << "\n#\n";
+    }
     return true;
 }
 

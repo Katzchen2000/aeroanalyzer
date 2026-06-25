@@ -19,7 +19,7 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     EvalResult r;
     r.geom = geom::decode(genes, spec_);
     // tip trailing edge closes to te_thick_tip_frac (default 0 = watertight tip)
-    r.geom.section_tip.te_thick = cfg_.getd("te_thick_tip_frac", 0.0);
+    r.geom.sections.back().te_thick = cfg_.getd("te_thick_tip_frac", 0.0);
     geom::loft(r.geom, n_stations_);
     r.mp = massprops::compute(r.geom, cfg_);
     // reporting re-eval (detail) turns on the relaxed-wake pass for exact CDi;
@@ -48,7 +48,7 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
 
     // (1) TE thickness clamp (plan §3)
     double te_min = cfg_.getd("te_thick_min_mm", 0.8) / 1000.0;
-    double te_actual = r.geom.section.te_thick * r.geom.root_chord;
+    double te_actual = r.geom.sections[0].te_thick * r.geom.root_chord;
     if (te_actual < te_min) cv += 50.0 * (te_min - te_actual) / te_min;
 
     // (2) tip Reynolds floor (plan §3)
@@ -101,25 +101,25 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     if (sm_floor_pen > 0.0 && r.aero.static_margin < sm_lo)
         cv += sm_floor_pen * (sm_lo - r.aero.static_margin) / sm_lo;
 
-    // (12) interior section validity: lower surface must stay below upper by a
-    // floor (plan blindspot Tier 1A). The mass objective rewards crossed
-    // (figure-8) sections, so without this gate the GA drives the lower CST
-    // weights up until t<0. Also kills razor-thin sections in the same sweep.
-    // Thickness blends linearly along the span, so the spanwise minimum lives at
-    // an endpoint: checking root + tip sections bounds the whole wing.
+    // (12) interior section validity: lower surface must stay below upper across
+    // all K control sections. The piecewise loft spans between them so checking
+    // every section bounds the full wing.
     double t_floor = cfg_.getd("min_thickness_frac", 0.005);  // 0.5% chord
     double min_t = 1e9;
-    for (const Airfoil* af : {&r.geom.section, &r.geom.section_tip}) {
+    for (const auto& af : r.geom.sections) {
         for (int i = 0; i < 60; ++i) {
             double x = 0.5 * (1.0 - std::cos(PI * i / 59.0));
-            // Skip the LE/TE: CST thickness is ~0 there by construction (and the
-            // closed tip is exactly 0 at x=1), so sampling the endpoints would make
-            // this gate unsatisfiable for every section. The TE is policed by #1.
+            // Skip LE/TE: CST thickness ~0 by construction; TE policed by #1.
             if (x < 0.05 || x > 0.95) continue;
-            min_t = std::min(min_t, geom::cst_upper(*af, x) - geom::cst_lower(*af, x));
+            min_t = std::min(min_t, geom::cst_upper(af, x) - geom::cst_lower(af, x));
         }
     }
     if (min_t < t_floor) cv += 40.0 * (t_floor - min_t) / t_floor;
+
+    // (14) chord-collapse: catches le_bow/te_bow combos that make tip chord negative
+    double chord_min_m = cfg_.getd("chord_min_m", 0.03);
+    for (const auto& s : r.geom.stations)
+        if (s.chord < chord_min_m) cv += 50.0 * (chord_min_m - s.chord) / chord_min_m;
 
     // (13) surrogate confidence: keep OOD polars from silently passing.
     double conf_threshold = cfg_.getd("confidence_threshold", 0.5);
