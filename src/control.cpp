@@ -175,5 +175,33 @@ double adverse_yaw_cn_da(const WingGeometry& w, const MassProps& mp,
     return (2.0 / (S * b)) * num;
 }
 
+LateralDerivs lateral_derivs(const WingGeometry& w, const MassProps& mp,
+                               double CL, double CD, const Config& cfg) {
+    LateralDerivs ld{};
+    const double b  = mp.b_full > 0 ? mp.b_full : 2.0 * w.semi_span;
+    const double S  = mp.S_ref  > 0 ? mp.S_ref  : 1.0;
+    const double AR = (b > 0 && S > 0) ? b * b / S : 1.0;
+    if (b <= 0.0 || S <= 0.0) return ld;
+
+    // Cn_beta: weathercock stability from LE sweep (Etkin / NACA TN 1208).
+    // For a swept-wing flying wing (no vertical tail):
+    //   Cn_beta = CL^2 * tan(LE_sweep) / (2*pi*AR), per rad (>0 = stable)
+    const double cn_beta_scale = cfg.getd("cn_beta_scale", 1.0);
+    ld.cn_beta = cn_beta_scale * CL * CL * std::tan(w.le_sweep) / (2.0 * PI * AR);
+
+    // Cn_r: yaw-rate damping from spanwise drag distribution (strip theory).
+    // Cn_r = -8 * CD * sum(chord * y^2 * dy over right half) / (S * b^2)
+    // Derivation: in yaw rate r, each strip at ±y sees ±(2ry/V) velocity change
+    // -> drag moment N = -4*q*CD*r/V * sum(chord*y^2*dy); nondim by q*S*b*(rb/2V).
+    double roll_damp = 0.0;
+    for (const auto& s : w.stations)
+        roll_damp += s.chord * s.y * s.y * s.width;
+    const double cn_r_scale = cfg.getd("cn_r_scale", 1.0);
+    ld.cn_r = cn_r_scale * (-8.0 * CD * roll_damp / (S * b * b));
+    // ponytail: single-DOF yaw oscillator; ignores roll coupling (Cl_beta/dihedral).
+    // Upgrade to 2-DOF lateral state matrix (Ixx, Ixz, Cl_beta) if roll coupling matters.
+    return ld;
+}
+
 }  // namespace control
 }  // namespace aero

@@ -15,6 +15,7 @@ namespace viscous {
 
 Polar Surrogate::analytic(double cl, double Re) const {
     Polar p;
+    p.confidence = 1.0;
     Re = std::max(Re, 1.0e4);
     double rough = std::max(0.0, (9.0 - ncrit_)) * 0.0006;
     double cd0 = 0.0065 + 0.012 * std::pow(1.0e5 / Re, 0.5) + rough;
@@ -130,7 +131,7 @@ static std::size_t shape_sig(const std::vector<double>& shape, double te) {
 
 void Surrogate::nf_coeffs(const std::vector<double>& shape, double te, double Re,
                           double& cd0, double& k, double& cl_max, double& cl_min,
-                          double& cm0, bool& low_conf) const {
+                          double& cm0, double& confidence) const {
     // ---- 4+4 project CST -> 8+8 Kulfan refit. Shared by every station of a
     //      candidate (same shape), so memoize; the GA runs under OpenMP, hence
     //      thread_local (no shared-state race on the const query path). ----
@@ -169,7 +170,8 @@ void Surrogate::nf_coeffs(const std::vector<double>& shape, double te, double Re
     struct Coeff {
         std::size_t key = 0;
         double cd0 = 0, k = 0, clmax = 0, clmin = 0, cm0 = 0;
-        bool lowc = false, valid = false;
+        double confidence = 1.0;
+        bool valid = false;
     };
     constexpr int NC = 64;
     thread_local std::array<Coeff, NC> cache{};
@@ -179,7 +181,7 @@ void Surrogate::nf_coeffs(const std::vector<double>& shape, double te, double Re
     for (const auto& c : cache)
         if (c.valid && c.key == key) {
             cd0 = c.cd0; k = c.k; cl_max = c.clmax; cl_min = c.clmin;
-            cm0 = c.cm0; low_conf = c.lowc;
+            cm0 = c.cm0; confidence = c.confidence;
             return;
         }
 
@@ -218,19 +220,19 @@ void Surrogate::nf_coeffs(const std::vector<double>& shape, double te, double Re
     cl_max = (clmax > -1e8) ? clmax : 1.2;
     cl_min = (clmin <  1e8) ? clmin : -0.6;
     cm0 = cm_at_min;
-    low_conf = (conf_band < 0.5);
+    confidence = conf_band;
 
-    cache[rr] = Coeff{key, cd0, k, cl_max, cl_min, cm0, low_conf, true};
+    cache[rr] = Coeff{key, cd0, k, cl_max, cl_min, cm0, confidence, true};
     rr = (rr + 1) % NC;
 }
 
 Polar Surrogate::query(const std::vector<double>& shape, double cl,
                        double Re, double te) const {
     if (backend_ == Backend::NeuralFoil && nf_.loaded() && shape.size() >= 8) {
-        double cd0, k, cmx, cmn, cm0; bool low_conf = false;
-        nf_coeffs(shape, te, Re, cd0, k, cmx, cmn, cm0, low_conf);
+        double cd0, k, cmx, cmn, cm0, confidence = 1.0;
+        nf_coeffs(shape, te, Re, cd0, k, cmx, cmn, cm0, confidence);
         Polar p;
-        p.cl_max = cmx; p.cl_min = cmn; p.cm = cm0;
+        p.cl_max = cmx; p.cl_min = cmn; p.cm = cm0; p.confidence = confidence;
         double cl_eff = cl;
         if (cl > p.cl_max)      { cl_eff = p.cl_max; p.clamped = true; }
         else if (cl < p.cl_min) { cl_eff = p.cl_min; p.clamped = true; }
@@ -239,7 +241,7 @@ Polar Surrogate::query(const std::vector<double>& shape, double cl,
             double over = std::fabs(cl - cl_eff);
             p.cd += 0.9 * over * over + 0.05 * over;
         }
-        if (low_conf) p.clamped = true;      // out-of-distribution flag
+        if (confidence < 0.5) p.clamped = true;  // out-of-distribution flag
         return p;
     }
 
@@ -284,7 +286,10 @@ Polar Surrogate::query(const std::vector<double>& shape, double cl,
         double over = std::fabs(cl - cl_eff);
         p.cd += 0.9 * over * over + 0.05 * over;
     }
-    if (out_of_hull) p.clamped = true;   // flag shape/Re extrapolation
+    if (out_of_hull) {
+        p.clamped = true;   // flag shape/Re extrapolation
+        p.confidence = 0.0;
+    }
     return p;
 }
 

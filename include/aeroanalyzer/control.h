@@ -49,5 +49,16 @@ double adverse_yaw_cn_da(const WingGeometry& w, const MassProps& mp,
                          const std::vector<double>& cl_local,
                          double a, const Config& cfg);
 
+// Lateral (yaw) stability derivatives for the Dutch-roll approximation.
+// Uses strip theory with only geometry + trimmed CL/CD; no surrogate needed.
+// CL, CD: trimmed aerodynamic coefficients from stability::trim().
+// Returns Cn_beta (weathercock, per rad) and Cn_r (yaw damping, per rb/2V).
+struct LateralDerivs {
+    double cn_beta = 0.0;  // >0 = directionally stable
+    double cn_r    = 0.0;  // <0 = yaw-rate damping
+};
+LateralDerivs lateral_derivs(const WingGeometry& w, const MassProps& mp,
+                               double CL, double CD, const Config& cfg);
+
 }  // namespace control
 }  // namespace aero

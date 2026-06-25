@@ -681,3 +681,35 @@ TEST(relaxed_wake_refines_cdi) {
     CHECK(relax.CDi > 0.0);
     CHECK(std::fabs(relax.CDi - froze.CDi) / froze.CDi < 0.05);
 }
+
+// Dynamic stability metrics: Dutch-roll and phugoid.
+// A positively swept, positively loaded wing must produce:
+//   Cn_beta > 0 (weathercock stable), Cn_r < 0 (yaw damping),
+//   dutch_roll_zeta > 0 (damped), phugoid_zeta > 0 (damped).
+// Phugoid cross-check: Lanchester formula gives zeta = CD/(sqrt(2)*CL).
+TEST(dynamic_stability_metrics) {
+    Config cfg;
+    cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();   // 18 deg sweep, positive CL airfoil
+    MassProps mp = massprops::compute(w, cfg);
+
+    // Full trim (stability::trim populates dynamic fields)
+    AeroState st = stability::trim(w, mp, surr, cfg);
+    CHECK(st.trimmed);
+
+    // Izz must be positive for any real geometry
+    CHECK(mp.Izz > 0.0);
+
+    // Sign checks
+    CHECK(st.cn_beta > 0.0);           // swept wing is directionally stable
+    CHECK(st.cn_r < 0.0);             // yaw rate is damped
+    CHECK(st.dutch_roll_zeta > 0.0);  // Dutch roll is damped
+    CHECK(st.dutch_roll_omega > 0.0);
+
+    // Phugoid closed form: zeta_ph = CD / (sqrt(2) * CL)
+    double zeta_ph_ref = st.CD / (std::sqrt(2.0) * st.CL);
+    CHECK(std::fabs(st.phugoid_zeta - zeta_ph_ref) < 1e-10);
+}

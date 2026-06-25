@@ -29,12 +29,15 @@ TEST(surrogate_tables_load_and_query) {
     std::vector<double> shape = {0.20, 0.17, 0.14, 0.11, -0.12, -0.09, -0.02, 0.06};
     viscous::Polar p = surr.query(shape, 0.4, 200000);
     CHECK(!p.clamped);
+    CHECK_NEAR(p.confidence, 1.0, 1e-12);
     CHECK(p.cd > 0.0);
     CHECK_NEAR(p.cd, 0.010 + 0.013 * 0.16, 2e-3);   // ~ sample 1's polar
 
     // shape outside the trained hull -> flagged
     std::vector<double> far(8, 1.0);
-    CHECK(surr.query(far, 0.3, 200000).clamped);
+    viscous::Polar out = surr.query(far, 0.3, 200000);
+    CHECK(out.clamped);
+    CHECK_NEAR(out.confidence, 0.0, 1e-12);
     // absurd cl beyond cl_max -> flagged
     CHECK(surr.query(shape, 3.0, 200000).clamped);
 }

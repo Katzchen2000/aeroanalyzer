@@ -299,6 +299,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.cl_local.assign(w.stations.size(), 0.0);
     double CDp_num  = 0.0;
     bool   tip_stall = false;
+    double min_conf = 1.0;
 
     // Induced-angle estimate for strip cl (elliptic approximation for the
     // viscous query; the VLM already gave us the global CL accurately).
@@ -324,6 +325,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
         shape.insert(shape.end(), s.af.wu.begin(), s.af.wu.end());
         shape.insert(shape.end(), s.af.wl.begin(), s.af.wl.end());
         viscous::Polar pol = surr.query(shape, cl_norm, Re, s.af.te_thick);
+        min_conf = std::min(min_conf, pol.confidence);
 
         // Crossflow penalty on outer span for swept leading edges
         double ramp = 0.0;
@@ -341,6 +343,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     st.CDp    = (Shalf > 0) ? CDp_num / Shalf : 0.0;
     st.CD     = st.CDi + st.CDp;
     st.tip_stall = tip_stall;
+    st.polar_confidence = min_conf;
     st.cn_da  = control::adverse_yaw_cn_da(w, mp, surr, st.cl_local, a_ref, cfg);
 
     // ---- Pitching moment about CG ----------------------------------------

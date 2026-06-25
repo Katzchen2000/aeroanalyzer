@@ -88,7 +88,11 @@ int main(int argc, char** argv) {
     std::filesystem::create_directories("out");
     std::ofstream csv("out/pareto.csv");
     csv << "idx,drag_N,mass_kg,sm_dev,static_margin,span_m,AR,root_c,tip_c,"
-           "sweep_deg,washout_deg,CL,CD,hinge_kgcm,roll_helix,mode\n";
+           "sweep_deg,washout_deg,CL,CD,hinge_kgcm,roll_helix,mode,"
+           "dutch_roll_zeta,phugoid_zeta";
+    for (std::size_t g = 0; g < eval.spec().size(); ++g)
+        csv << "," << eval.spec().names[g];
+    csv << "\n";
     csv << std::fixed << std::setprecision(5);
 
     // Accumulate for summary (reuses the eval.detail calls made for the CSV)
@@ -103,7 +107,11 @@ int main(int argc, char** argv) {
             << r.geom.tip_chord << "," << (r.geom.le_sweep * RAD2DEG) << ","
             << (r.geom.washout * RAD2DEG) << "," << r.aero.CL << "," << r.aero.CD
             << "," << r.aero.hinge_moment << "," << r.aero.roll_helix << ","
-            << (r.geom.mode == ControlMode::Elevon ? "elevon" : "split") << "\n";
+            << (r.geom.mode == ControlMode::Elevon ? "elevon" : "split")
+            << "," << r.aero.dutch_roll_zeta << "," << r.aero.phugoid_zeta;
+        for (std::size_t g = 0; g < c.genes.size(); ++g)
+            csv << "," << c.genes[g];
+        csv << "\n";
         s_drag.push_back(c.objectives[OBJ_DRAG]);
         s_mass.push_back(c.objectives[OBJ_MASS]);
         s_sm.push_back(r.aero.static_margin * 100.0);
@@ -179,6 +187,19 @@ int main(int argc, char** argv) {
             EvalResult r = eval.detail(pop[pk.idx].genes);
             std::string stem = std::string("out/") + pk.name;
             avl::write_case(stem, r.geom, r.mp, cfg);
+            // Sidecar: panel reference numbers for validate_avl.ps1 cross-check.
+            {
+                std::ofstream sc(stem + "_panel.txt");
+                sc << std::fixed << std::setprecision(6);
+                sc << "alpha_deg = " << (r.aero.alpha * RAD2DEG) << "\n";
+                sc << "CL        = " << r.aero.CL                << "\n";
+                sc << "CDi       = " << r.aero.CDi               << "\n";
+                sc << "e         = " << r.aero.e                 << "\n";
+                sc << "x_np      = " << r.aero.x_np              << "\n";
+                sc << "x_cg      = " << r.mp.x_cg                << "\n";
+                sc << "mac       = " << r.mp.mac                 << "\n";
+                sc << "sm        = " << r.aero.static_margin     << "\n";
+            }
             std::cout << "  " << std::setw(9) << pk.name
                       << " : drag " << std::setprecision(3)
                       << r.objectives[OBJ_DRAG] << " N, mass "

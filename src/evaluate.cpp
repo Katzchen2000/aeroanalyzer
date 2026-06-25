@@ -55,19 +55,18 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     double re_min = cfg_.getd("re_tip_min", 100000.0);
     double Re_tip = RHO * V * r.geom.tip_chord / MU;
     if (Re_tip < re_min) cv += 5.0 * (re_min - Re_tip) / re_min;
-/*
     // (3) spar-to-OML clearance: continuous penalty under 1mm (plan §4)
     double clear_target = 0.001;
     if (r.mp.spar_clearance < clear_target) {
         double d = (clear_target - r.mp.spar_clearance) / clear_target;
         cv += (r.mp.spar_clearance < 0.0 ? 30.0 : 4.0) * d;  // breach is worse
     }
- //commented out for now to see if it helps the GA find feasible designs (plan §4)
+
     // (4) hinge-moment gate, fatal (plan §7)
     double hinge_max = cfg_.getd("hinge_moment_max", 1.2);
     if (r.aero.hinge_moment > hinge_max)
         cv += 40.0 * (r.aero.hinge_moment - hinge_max) / hinge_max;
-*/
+
     // (5) high-alpha NP must stay aft of CG, else delete (plan §7)
     if (r.aero.x_np_high < r.mp.x_cg) {
         double d = (r.mp.x_cg - r.aero.x_np_high) / (r.mp.mac > 0 ? r.mp.mac : 1);
@@ -87,14 +86,13 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     double helix_min = cfg_.getd("roll_helix_min", 0.05);
     if (helix_min > 0.0 && r.aero.roll_helix < helix_min)
         cv += 30.0 * (helix_min - r.aero.roll_helix) / helix_min;
-/*
     // (10) hardware keep-out: motor + avionics must fit in section (M6)
     if (r.mp.hw_clearance < 0.0) {
         double hw_ref = cfg_.getd("motor_diameter", 0.028) * 0.5;
         if (hw_ref <= 0.0) hw_ref = 0.014;
         cv += 30.0 * (-r.mp.hw_clearance) / hw_ref;
     }
-*/
+
     // (11) static-margin band floor: the OBJ_SM band is only an objective, so
     // the drag-minimizing corner of the front sits below sm_lo (less washout =>
     // less trim drag). This hard cv gate forces every feasible design into the
@@ -123,6 +121,11 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     }
     if (min_t < t_floor) cv += 40.0 * (t_floor - min_t) / t_floor;
 
+    // (13) surrogate confidence: keep OOD polars from silently passing.
+    double conf_threshold = cfg_.getd("confidence_threshold", 0.5);
+    if (conf_threshold > 0.0 && r.aero.polar_confidence < conf_threshold)
+        cv += 10.0 * (conf_threshold - r.aero.polar_confidence) / conf_threshold;
+
     // (15) adverse-yaw protection: penalize positive Cn_da (aileron yaw opposing
     // the roll). Differential throw (aileron_diff_ratio) is the design lever.
     // Configurable like sm_floor_penalty: adverse yaw is a matter of degree (most
@@ -130,6 +133,20 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     // pushed toward differential-friendly designs; 0 disables the gate.
     double adv_pen = cfg_.getd("adverse_yaw_penalty", 50.0);
     if (adv_pen > 0.0 && r.aero.cn_da > 0.0) cv += adv_pen * r.aero.cn_da;
+
+    // (16) dynamic stability: Dutch-roll + phugoid damping gates (opt-in).
+    // Default dynamic_stab_penalty = 0 so metrics are computed and reported
+    // in pareto.csv without affecting the feasible count (feasibility is fragile).
+    // Set dynamic_stab_penalty > 0 to enforce the damping floors.
+    double dyn_pen = cfg_.getd("dynamic_stab_penalty", 0.0);
+    if (dyn_pen > 0.0) {
+        double zdr_min = cfg_.getd("dutch_roll_zeta_min", 0.0);
+        double zph_min = cfg_.getd("phugoid_zeta_min", 0.0);
+        if (r.aero.dutch_roll_zeta < zdr_min)
+            cv += dyn_pen * (zdr_min - r.aero.dutch_roll_zeta);
+        if (r.aero.phugoid_zeta < zph_min)
+            cv += dyn_pen * (zph_min - r.aero.phugoid_zeta);
+    }
 
     r.cv = cv;
     return r;

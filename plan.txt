@@ -1,0 +1,28 @@
+# Milestone specification
+
+Updated on 2026-06-24.
+
+## Current state
+
+- Root/tip CST genome is in place and covered by tests.
+- Morino panel solver is the 3D model of record.
+- NeuralFoil is the runtime-default viscous backend.
+- Safety gates for spar clearance, hinge moment, hardware fit, roll authority, adverse yaw, and low-confidence polars are enabled by default.
+
+## Open milestones, in order
+
+1. Automate AVL validation
+- Compare min_drag, min_mass, and knee decks against AVL.
+- Acceptance: results stay within documented tolerance bands.
+
+2. Add dynamic stability
+- Compute Dutch-roll and phugoid metrics.
+- Acceptance: damping criteria can be reported or enforced.
+
+3. Expand geometry
+- Add curved planform controls and/or more than two spanwise sections.
+- Acceptance: genome, seeds, lofting, and tests cover the new degrees of freedom.
+
+4. Improve UX and analysis
+- Add Pareto visualization, checkpoint/restart, sensitivity sweeps, and export helpers.
+- Acceptance: runs can be resumed and inspected without manual CSV work.

@@ -26,6 +26,7 @@ struct Polar {
     double cl_max = 1.15;
     double cl_min = -0.6;
     bool clamped = false;   // query outside the valid cl/Re/shape hull
+    double confidence = 1.0; // 0..1 trust indicator from backend/hull checks
 };
 
 // Viscous engine behind the surrogate. NeuralFoil is the default (in-process
@@ -65,7 +66,7 @@ private:
     // the swept operating band falls out of the network's trust region.
     void nf_coeffs(const std::vector<double>& shape, double te, double Re,
                    double& cd0, double& k, double& cl_max, double& cl_min,
-                   double& cm0, bool& low_conf) const;
+                   double& cm0, double& confidence) const;
 
     Backend backend_ = Backend::NeuralFoil;
     nf::NeuralFoil nf_;
