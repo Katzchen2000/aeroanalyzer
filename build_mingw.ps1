@@ -64,6 +64,13 @@ function Build([string[]]$extra, [string]$outName, [string]$label) {
 # ---- application ----
 Build @((Join-Path $root 'app\main.cpp')) "aeroanalyzer.exe" "Building aeroanalyzer.exe"
 
+# ---- wing2csv (no aerocore dependency, no Eigen/OpenMP) ----
+Write-Host "==> Building wing2csv.exe" -ForegroundColor Cyan
+& $gpp '-std=c++17','-O2','-static-libgcc','-static-libstdc++',
+       (Join-Path $root 'app\wing2csv.cpp'), '-o', (Join-Path $build 'wing2csv.exe')
+if ($LASTEXITCODE -ne 0) { Write-Error "wing2csv build failed (exit $LASTEXITCODE)" }
+Write-Host "Built: $build\wing2csv.exe" -ForegroundColor Green
+
 # ---- bundle OpenMP/pthread DLLs so the exe runs outside MSYS2 PATH ----
 foreach ($dll in @('libgomp-1.dll','libwinpthread-1.dll')) {
   $src = Join-Path $mingwBin $dll

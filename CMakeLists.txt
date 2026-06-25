@@ -49,6 +49,9 @@ endif()
 add_executable(aeroanalyzer app/main.cpp)
 target_link_libraries(aeroanalyzer PRIVATE aerocore)
 
+add_executable(wing2csv app/wing2csv.cpp)
+# wing2csv reads output files only — no aerocore dependency, just std
+
 enable_testing()
 file(GLOB TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
 add_executable(unit_tests ${TEST_SRC})
