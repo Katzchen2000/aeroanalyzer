@@ -5,7 +5,7 @@
 namespace aero {
 namespace geom {
 
-GenomeSpec default_genome() {
+GenomeSpec default_genome(const Config& cfg) {
     GenomeSpec g;
     g.lo.resize(N_GENES);
     g.hi.resize(N_GENES);
@@ -48,6 +48,29 @@ GenomeSpec default_genome() {
             std::snprintf(nm, sizeof(nm), "%s%s", pfx[k], lsuf[i]);
             set(G_SEC(k, 1, i), nm, llo[i], lhi[i]);
         }
+    }
+    // Bezier extension genes — appended only when toggles active.
+    // ponytail: push_back so fixed indices G_* and G_SEC() are never disturbed.
+    auto push = [&](const char* nm, double lo_v, double hi_v) {
+        g.names.push_back(nm);
+        g.lo.push_back(lo_v);
+        g.hi.push_back(hi_v);
+    };
+    if (cfg.geti("bezier_te", 0)) {
+        // P1..P4 of a degree-5 TE chord-offset Bezier; P0=P5=0 (endpoints fixed).
+        // Positive offset → TE moved aft (wider chord); negative → TE pulled forward.
+        // ±8 cm gives enough room to curve inboard TE clear of prop disk.
+        push("te_bz1", -0.08, 0.08);
+        push("te_bz2", -0.08, 0.08);
+        push("te_bz3", -0.08, 0.08);
+        push("te_bz4", -0.08, 0.08);
+    }
+    if (cfg.geti("bezier_fold", 0)) {
+        // P1..P3 of a degree-4 fold Bezier; P0=0 (fold start), P4=1 (full cant).
+        // Values in [0,1] normal; >1 allows overshoot (S-curve cant ramp).
+        push("fold_bz1", 0.0, 1.5);
+        push("fold_bz2", 0.0, 1.5);
+        push("fold_bz3", 0.0, 1.5);
     }
     return g;
 }
@@ -153,7 +176,7 @@ ThinAirfoil thin_airfoil(const Airfoil& f) {
     return t;
 }
 
-WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec) {
+WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec, const Config& cfg) {
     auto clamp = [&](int i) {
         double v = g[i];
         if (v < spec.lo[i]) v = spec.lo[i];
@@ -186,6 +209,29 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec) {
                             clamp(G_SEC(k,1,2)), clamp(G_SEC(k,1,3))};
         w.sections[k].te_thick = 0.0;  // sharp TE everywhere; motor pocket via CAD split-plane
     }
+    // Decode bezier extension genes when toggles active
+    w.bezier_te_on   = cfg.geti("bezier_te",   0) != 0;
+    w.bezier_fold_on = cfg.geti("bezier_fold",  0) != 0;
+    int bidx = N_GENES;
+    if (w.bezier_te_on && (int)g.size() >= bidx + N_BEZ_TE) {
+        w.te_ctrl.resize(N_BEZ_TE);
+        for (int i = 0; i < N_BEZ_TE; ++i) {
+            double v = g[bidx + i];
+            if (v < spec.lo[bidx+i]) v = spec.lo[bidx+i];
+            if (v > spec.hi[bidx+i]) v = spec.hi[bidx+i];
+            w.te_ctrl[i] = v;
+        }
+        bidx += N_BEZ_TE;
+    }
+    if (w.bezier_fold_on && (int)g.size() >= bidx + N_BEZ_FOLD) {
+        w.fold_ctrl.resize(N_BEZ_FOLD);
+        for (int i = 0; i < N_BEZ_FOLD; ++i) {
+            double v = g[bidx + i];
+            if (v < spec.lo[bidx+i]) v = spec.lo[bidx+i];
+            if (v > spec.hi[bidx+i]) v = spec.hi[bidx+i];
+            w.fold_ctrl[i] = v;
+        }
+    }
     return w;
 }
 
@@ -212,12 +258,32 @@ void loft(WingGeometry& w, int n) {
         y[i] = b * 0.5 * (1.0 - std::cos(th));
     }
     // Pass 1: physical (yp, z_arr) and local dihedral angle via angle integration.
+    // ponytail: bezier_te adds chord offsets; bezier_fold replaces smoothstep cant ramp.
+    // Reuse existing bernstein(); endpoints pinned so power-law is the fallback at t=0,1.
+    auto te_bez_offset = [&](double t) -> double {
+        if (!w.bezier_te_on || (int)w.te_ctrl.size() < N_BEZ_TE) return 0.0;
+        // degree-5 Bezier: P0=0, P1..P4=genes, P5=0
+        double p[6] = {0.0, w.te_ctrl[0], w.te_ctrl[1], w.te_ctrl[2], w.te_ctrl[3], 0.0};
+        double r = 0.0;
+        for (int i = 0; i < 6; ++i) r += p[i] * bernstein(i, 5, t);
+        return r;
+    };
+    auto fold_bez = [&](double uc) -> double {
+        // uc in [0,1]: normalised position within winglet blend zone
+        if (!w.bezier_fold_on || (int)w.fold_ctrl.size() < N_BEZ_FOLD) {
+            return uc * uc * (3.0 - 2.0 * uc);  // ponytail: smoothstep fallback
+        }
+        // degree-4 Bezier: P0=0, P1..P3=genes, P4=1
+        double p[5] = {0.0, w.fold_ctrl[0], w.fold_ctrl[1], w.fold_ctrl[2], 1.0};
+        double r = 0.0;
+        for (int i = 0; i < 5; ++i) r += p[i] * bernstein(i, 4, uc);
+        return r;
+    };
     auto get_phi = [&](double t) {
         double phi_gull = std::atan(w.gull_a + 2.0 * w.gull_b * t + 3.0 * w.gull_c * t * t);
         double u = (t - eta_wl) / blend;
-        double ss = std::max(0.0, std::min(1.0, u));
-        double smoothstep01 = ss * ss * (3.0 - 2.0 * ss);
-        return phi_gull + cant * smoothstep01;
+        double uc = std::max(0.0, std::min(1.0, u));
+        return phi_gull + cant * fold_bez(uc);
     };
     std::vector<double> yp(n), z_arr(n), phi_arr(n);
     yp[0] = 0.0;
@@ -242,7 +308,8 @@ void loft(WingGeometry& w, int n) {
         s.eta      = t;
         // Power-law taper: chord(t) = root - (root-tip)*t^exp  (exp=1 → linear)
         double te = std::pow(t, w.chord_exp);
-        s.chord = w.root_chord - (w.root_chord - w.tip_chord) * te;
+        double chord_base = w.root_chord - (w.root_chord - w.tip_chord) * te;
+        s.chord = std::max(0.005, chord_base + te_bez_offset(t));
         // Power-law (crescent) sweep: x_le(t) = semi_span*tan(sweep)*t^exp
         double se = std::pow(t, w.sweep_exp);
         s.x_le  = b * std::tan(w.le_sweep) * se;

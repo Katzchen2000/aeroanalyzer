@@ -33,7 +33,10 @@ constexpr int G_WINGLET_ETA  = 14;  // winglet fold start, fraction of semi-span
 constexpr int N_PLANFORM    = 15;
 constexpr int N_CST_PER_SEC = 8;   // 4 wu + 4 wl per section
 constexpr int N_SECTIONS    = 5;
-constexpr int N_GENES = N_PLANFORM + N_SECTIONS * N_CST_PER_SEC;  // 55
+constexpr int N_GENES = N_PLANFORM + N_SECTIONS * N_CST_PER_SEC;  // 55 (base)
+// Bezier extension gene counts (appended after index 54 when toggles active)
+constexpr int N_BEZ_TE   = 4;  // interior TE chord-offset ctrl pts (degree-5 Bezier)
+constexpr int N_BEZ_FOLD = 3;  // interior fold cant ctrl pts (degree-4 Bezier)
 
 // Canonical η breakpoints for the 5 control sections.
 constexpr double SECTION_ETA[5] = {0.0, 0.5, 0.75, 0.875, 1.0};
@@ -48,7 +51,6 @@ struct GenomeSpec {
     std::vector<std::string> names;
     std::size_t size() const { return lo.size(); }
 };
-GenomeSpec default_genome();
 
 // ---- CST primitives -----------------------------------------------------
 double bernstein(int i, int n, double x);
@@ -74,7 +76,8 @@ struct ThinAirfoil {
 ThinAirfoil thin_airfoil(const Airfoil& f);
 
 // ---- genome -> physical wing -------------------------------------------
-WingGeometry decode(const std::vector<double>& genes, const GenomeSpec& spec);
+GenomeSpec default_genome(const Config& cfg = {});
+WingGeometry decode(const std::vector<double>& genes, const GenomeSpec& spec, const Config& cfg = {});
 // Cosine-spaced spanwise discretization (plan §3).
 void loft(WingGeometry& w, int n_stations);
 // Planform integrals from the lofted stations.

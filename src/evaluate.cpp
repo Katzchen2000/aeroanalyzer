@@ -8,7 +8,7 @@
 namespace aero {
 
 Evaluator::Evaluator(const Config& cfg) : cfg_(cfg) {
-    spec_ = geom::default_genome();
+    spec_ = geom::default_genome(cfg_);
     seeds_ = seeds::load_seeds(cfg_);
     seeds::widen_cst_bounds(spec_, seeds_, cfg_.getd("cst_bound_margin", 0.04));
     surr_.load("data/surrogates", cfg_);
@@ -17,7 +17,7 @@ Evaluator::Evaluator(const Config& cfg) : cfg_(cfg) {
 
 EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) const {
     EvalResult r;
-    r.geom = geom::decode(genes, spec_);
+    r.geom = geom::decode(genes, spec_, cfg_);
     r.geom.winglet_taper = cfg_.getd("winglet_taper", 1.0);
     r.geom.winglet_blend = cfg_.getd("winglet_blend", 0.06);
     geom::loft(r.geom, n_stations_);

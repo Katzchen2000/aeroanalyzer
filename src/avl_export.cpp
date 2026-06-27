@@ -241,6 +241,88 @@ bool write_stl(const std::string& stem, const WingGeometry& w, const Config& cfg
     }
 
     stl << "endsolid wing\n";
+
+    // ---- Control-surface solid (aileron slab, ail_span_frac..tip) ----------
+    // ponytail: aileron span only; elevon (0..ail_span_frac) same loop if needed
+    if (w.cs_chord_frac > 0.0 && w.ail_span_frac < 0.999) {
+        stl << "solid control_surface\n";
+        const double xf  = 1.0 - w.cs_chord_frac;  // hinge position as chord fraction from LE
+        const int NCS    = 40;                       // chordwise samples per surface half
+        const int MAFT   = 2 * NCS + 1;             // upper(NCS+1) + lower(NCS), TE shared
+
+        // Build the aft-slab contour for one station/side.
+        // Returns MAFT pts: [0]=upper_hinge, [NCS]=TE, [MAFT-1]=lower_hinge
+        auto make_aft = [&](const Station& s, double ys) {
+            std::vector<Pt3> pts;
+            pts.reserve(MAFT);
+            double rad = -s.twist, cosT = std::cos(rad), sinT = std::sin(rad);
+            auto push_cs = [&](double xfr, double zhat) {
+                double xc = xfr * s.chord, zc = zhat * s.chord;
+                double zr = xc * sinT + zc * cosT;
+                pts.push_back({s.x_le + xc * cosT - zc * sinT,
+                               ys * (s.y - zr * std::sin(s.dihedral)),
+                               s.z  + zr * std::cos(s.dihedral)});
+            };
+            for (int i = 0; i <= NCS; ++i) {        // upper: hinge → TE
+                double x = xf + (1.0 - xf) * i / NCS;
+                push_cs(x, geom::cst_upper(s.af, x));
+            }
+            for (int i = 1; i <= NCS; ++i) {        // lower: TE → hinge (skip TE)
+                double x = 1.0 - (1.0 - xf) * i / NCS;
+                push_cs(x, geom::cst_lower(s.af, x));
+            }
+            return pts;
+        };
+
+        for (int side = 0; side < 2; ++side) {
+            double ys = (side == 0) ? +1.0 : -1.0;
+
+            std::vector<int> aidx;
+            for (int si = 0; si < n; ++si)
+                if (w.stations[si].eta >= w.ail_span_frac - 1e-6)
+                    aidx.push_back(si);
+            if ((int)aidx.size() < 2) continue;
+
+            std::vector<std::vector<Pt3>> AC;
+            for (int si : aidx) AC.push_back(make_aft(w.stations[si], ys));
+            int na = (int)AC.size();
+
+            // Outer surface: lateral quad strips
+            for (int ai = 0; ai < na - 1; ++ai)
+                for (int j = 0; j < MAFT - 1; ++j) {
+                    tri(AC[ai][j],    AC[ai+1][j],   AC[ai+1][j+1]);
+                    tri(AC[ai][j],    AC[ai+1][j+1], AC[ai][j+1]);
+                }
+            // Hinge face: quads from upper_hinge[i] to lower_hinge[i]
+            for (int ai = 0; ai < na - 1; ++ai) {
+                Pt3 UH0 = AC[ai][0],       UH1 = AC[ai+1][0];
+                Pt3 LH0 = AC[ai][MAFT-1],  LH1 = AC[ai+1][MAFT-1];
+                tri(UH0, LH0, LH1);
+                tri(UH0, LH1, UH1);
+            }
+            // Inboard cap: fan from centroid (reversed winding → outward normal)
+            {
+                const auto& C0 = AC[0];
+                Pt3 cen = {0.0, 0.0, 0.0};
+                for (const auto& p : C0) { cen[0]+=p[0]; cen[1]+=p[1]; cen[2]+=p[2]; }
+                double inv = 1.0 / C0.size();
+                cen[0]*=inv; cen[1]*=inv; cen[2]*=inv;
+                for (int j = 0; j < (int)C0.size()-1; ++j)
+                    tri(cen, C0[j+1], C0[j]);
+            }
+            // Outboard (tip) cap: fan, opposite winding
+            {
+                const auto& Cn = AC[na-1];
+                Pt3 cen = {0.0, 0.0, 0.0};
+                for (const auto& p : Cn) { cen[0]+=p[0]; cen[1]+=p[1]; cen[2]+=p[2]; }
+                double inv = 1.0 / Cn.size();
+                cen[0]*=inv; cen[1]*=inv; cen[2]*=inv;
+                for (int j = 0; j < (int)Cn.size()-1; ++j)
+                    tri(cen, Cn[j], Cn[j+1]);
+            }
+        }
+        stl << "endsolid control_surface\n";
+    }
     return true;
 }
 

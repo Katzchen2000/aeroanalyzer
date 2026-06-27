@@ -191,9 +191,12 @@ int main(int argc, char** argv) {
         for (auto& pk : picks) {
             EvalResult r = eval.detail(pop[pk.idx].genes);
             std::string stem = std::string("out/") + pk.name;
-            avl::write_case(stem, r.geom, r.mp, cfg);
-            avl::write_3d_csv(stem, r.geom);
-            avl::write_stl(stem, r.geom, cfg);
+            // Re-loft at export resolution; GA uses n_stations for speed.
+            WingGeometry rg = r.geom;
+            geom::loft(rg, cfg.geti("n_stations_export", 60));
+            avl::write_case(stem, rg, r.mp, cfg);
+            avl::write_3d_csv(stem, rg);
+            avl::write_stl(stem, rg, cfg);
             // Sidecar: panel reference numbers for validate_avl.ps1 cross-check.
             {
                 std::ofstream sc(stem + "_panel.txt");

@@ -72,6 +72,11 @@ struct WingGeometry {
     double cs_chord_frac = 0.25;  // control-surface chord fraction [0.15, 0.35]
     double ail_span_frac = 0.60;  // aileron inboard edge, fraction of semi-span [0.40, 0.80]
     std::vector<Station> stations;  // filled by geom::loft()
+    // Bezier planform / fold extensions (populated by decode when toggles active)
+    bool bezier_te_on   = false;  // TE offset Bezier active
+    bool bezier_fold_on = false;  // winglet fold Bezier active
+    std::vector<double> te_ctrl;    // 4 interior TE chord-offset ctrl pts (P1..P4, degree-5)
+    std::vector<double> fold_ctrl;  // 3 interior fold cant ctrl pts (P1..P3, degree-4)
 };
 
 // ---- mass properties ----------------------------------------------------
