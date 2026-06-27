@@ -10,9 +10,18 @@
 namespace aero {
 namespace avl {
 
-// Writes <stem>.avl and <stem>.dat. Returns false on file error.
+// Writes <stem>.avl and <stem>_s*.dat. Returns false on file error.
 bool write_case(const std::string& stem, const WingGeometry& w,
                 const MassProps& mp, const Config& cfg);
+
+// Writes <stem>_3d.csv directly from lofted stations (no AVL intermediary).
+// Produces one contour per station × 2 sides; usable in Fusion360/SolidWorks.
+bool write_3d_csv(const std::string& stem, const WingGeometry& w);
+
+// Writes <stem>.stl: ASCII STL mesh from lofted stations (watertight half-wings
+// + root/tip caps) plus a prop-disk triangle fan as a visual marker.
+// prop_diameter / prop_hub_gap read from cfg.
+bool write_stl(const std::string& stem, const WingGeometry& w, const Config& cfg);
 
 }  // namespace avl
 }  // namespace aero

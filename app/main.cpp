@@ -22,8 +22,9 @@ void print_dash(const EngineDashboard& d) {
               << "/" << d.pop_size
               << " | front0 " << std::setw(4) << d.front0_size;
     if (d.feasible_count > 0) {
-        std::cout << " | min drag " << std::fixed << std::setprecision(3)
-                  << d.best_drag.objectives[OBJ_DRAG] << " N"
+        std::cout << " | best L/D " << std::fixed << std::setprecision(3)
+                  << (d.best_drag.objectives[OBJ_DRAG] > 0
+                      ? 1.0 / d.best_drag.objectives[OBJ_DRAG] : 0.0) << " "
                   << " | min mass " << d.best_mass.objectives[OBJ_MASS] << " kg"
                   << " | best SMdev " << std::setprecision(4)
                   << d.best_sm.objectives[OBJ_SM];
@@ -87,9 +88,10 @@ int main(int argc, char** argv) {
 
     std::filesystem::create_directories("out");
     std::ofstream csv("out/pareto.csv");
-    csv << "idx,drag_N,mass_kg,sm_dev,static_margin,span_m,AR,root_c,tip_c,"
+    csv << "idx,inv_LD,mass_kg,sm_dev,static_margin,span_m,AR,root_c,tip_c,"
            "sweep_deg,washout_deg,CL,CD,hinge_kgcm,roll_helix,mode,"
-           "dutch_roll_zeta,phugoid_zeta";
+           "dutch_roll_zeta,phugoid_zeta,"
+           "cn_beta_turn,dutch_roll_zeta_turn,tip_stall_turn";
     for (std::size_t g = 0; g < eval.spec().size(); ++g)
         csv << "," << eval.spec().names[g];
     csv << "\n";
@@ -108,7 +110,10 @@ int main(int argc, char** argv) {
             << (r.geom.washout * RAD2DEG) << "," << r.aero.CL << "," << r.aero.CD
             << "," << r.aero.hinge_moment << "," << r.aero.roll_helix << ","
             << (r.geom.mode == ControlMode::Elevon ? "elevon" : "split")
-            << "," << r.aero.dutch_roll_zeta << "," << r.aero.phugoid_zeta;
+            << "," << r.aero.dutch_roll_zeta << "," << r.aero.phugoid_zeta
+            << "," << r.aero.cn_beta_turn
+            << "," << r.aero.dutch_roll_zeta_turn
+            << "," << (r.aero.tip_stall_turn ? 1 : 0);
         for (std::size_t g = 0; g < c.genes.size(); ++g)
             csv << "," << c.genes[g];
         csv << "\n";
@@ -187,6 +192,8 @@ int main(int argc, char** argv) {
             EvalResult r = eval.detail(pop[pk.idx].genes);
             std::string stem = std::string("out/") + pk.name;
             avl::write_case(stem, r.geom, r.mp, cfg);
+            avl::write_3d_csv(stem, r.geom);
+            avl::write_stl(stem, r.geom, cfg);
             // Sidecar: panel reference numbers for validate_avl.ps1 cross-check.
             {
                 std::ofstream sc(stem + "_panel.txt");
@@ -199,14 +206,41 @@ int main(int argc, char** argv) {
                 sc << "x_cg      = " << r.mp.x_cg                << "\n";
                 sc << "mac       = " << r.mp.mac                 << "\n";
                 sc << "sm        = " << r.aero.static_margin     << "\n";
+                sc << "dutch_roll_zeta      = " << r.aero.dutch_roll_zeta       << "\n";
+                sc << "phugoid_zeta         = " << r.aero.phugoid_zeta          << "\n";
+                sc << "cn_beta              = " << r.aero.cn_beta               << "\n";
+                sc << "dutch_roll_zeta_turn = " << r.aero.dutch_roll_zeta_turn  << "\n";
+                sc << "cn_beta_turn         = " << r.aero.cn_beta_turn          << "\n";
+                sc << std::setprecision(4);
+                sc << "batt_box_center = " << r.mp.batt_cx << ", "
+                   << r.mp.batt_cy << ", " << r.mp.batt_cz << "\n";
+                sc << "batt_box_dims   = " << r.mp.batt_lx << " x "
+                   << r.mp.batt_ly << " x " << r.mp.batt_lz << "  (L x W x H, m)\n";
             }
             std::cout << "  " << std::setw(9) << pk.name
-                      << " : drag " << std::setprecision(3)
-                      << r.objectives[OBJ_DRAG] << " N, mass "
+                      << " : L/D " << std::setprecision(3)
+                      << (r.objectives[OBJ_DRAG] > 0 ? 1.0/r.objectives[OBJ_DRAG] : 0.0)
+                      << ", mass "
                       << r.objectives[OBJ_MASS] << " kg, SM "
                       << std::setprecision(3) << (r.aero.static_margin * 100.0)
                       << " %, AR " << r.mp.AR
-                      << "  -> " << stem << ".avl\n";
+                      << ", DRz " << std::setprecision(3) << r.aero.dutch_roll_zeta
+                      << "  -> " << stem << ".avl/.stl"
+                      << "\n             CAD: mirror Y=0";
+            {
+                double bed_mm = 250.0, b_semi = r.geom.semi_span;
+                if (r.mp.b_full * 1000.0 > bed_mm) {
+                    int ns = (int)std::ceil(r.mp.b_full * 1000.0 / bed_mm) - 1;
+                    for (int sp = 1; sp <= ns; ++sp)
+                        std::cout << "  print-split Y="
+                                  << std::setprecision(3) << (b_semi * sp / (ns+1)) << "m";
+                }
+            }
+            std::cout << "\n             batt ctr (x,y,z)=("
+                      << std::setprecision(4) << r.mp.batt_cx << ","
+                      << r.mp.batt_cy << "," << r.mp.batt_cz
+                      << ") box " << r.mp.batt_lx << "x"
+                      << r.mp.batt_ly << "x" << r.mp.batt_lz << " m\n";
         }
     } else {
         std::cout << "No feasible designs found — relax constraints or check "

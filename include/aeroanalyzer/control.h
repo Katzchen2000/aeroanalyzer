@@ -56,6 +56,9 @@ double adverse_yaw_cn_da(const WingGeometry& w, const MassProps& mp,
 struct LateralDerivs {
     double cn_beta = 0.0;  // >0 = directionally stable
     double cn_r    = 0.0;  // <0 = yaw-rate damping
+    double cn_p    = 0.0;  // yaw from roll rate; <0 for swept-back wing
+    double cl_beta = 0.0;  // <0 = roll restoring (dihedral + sweep)
+    double cl_r    = 0.0;  // roll from yaw rate; ≈ CL/4
 };
 LateralDerivs lateral_derivs(const WingGeometry& w, const MassProps& mp,
                                double CL, double CD, const Config& cfg);

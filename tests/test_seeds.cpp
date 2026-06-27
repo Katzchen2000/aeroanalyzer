@@ -38,7 +38,7 @@ TEST(seed_genome_decodes_to_seed_shape) {
     seeds::widen_cst_bounds(spec, s, 0.04);
     auto g = seeds::build_seed_genomes(spec, s, 1, 6);
     CHECK(g.size() == 6);
-    CHECK((int)g[0].size() == geom::N_GENES);  // 52 genes
+    CHECK((int)g[0].size() == geom::N_GENES);  // 55 genes
     WingGeometry w = geom::decode(g[0], spec);
     for (int i = 0; i < 4; ++i)
         CHECK_NEAR(w.sections[0].wu[i], s.airfoils[0].wu[i], 1e-6);

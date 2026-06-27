@@ -190,16 +190,28 @@ LateralDerivs lateral_derivs(const WingGeometry& w, const MassProps& mp,
     ld.cn_beta = cn_beta_scale * CL * CL * std::tan(w.le_sweep) / (2.0 * PI * AR);
 
     // Cn_r: yaw-rate damping from spanwise drag distribution (strip theory).
-    // Cn_r = -8 * CD * sum(chord * y^2 * dy over right half) / (S * b^2)
-    // Derivation: in yaw rate r, each strip at ±y sees ±(2ry/V) velocity change
-    // -> drag moment N = -4*q*CD*r/V * sum(chord*y^2*dy); nondim by q*S*b*(rb/2V).
     double roll_damp = 0.0;
     for (const auto& s : w.stations)
         roll_damp += s.chord * s.y * s.y * s.width;
     const double cn_r_scale = cfg.getd("cn_r_scale", 1.0);
     ld.cn_r = cn_r_scale * (-8.0 * CD * roll_damp / (S * b * b));
-    // ponytail: single-DOF yaw oscillator; ignores roll coupling (Cl_beta/dihedral).
-    // Upgrade to 2-DOF lateral state matrix (Ixx, Ixz, Cl_beta) if roll coupling matters.
+
+    // Cl_beta: roll-due-to-sideslip (dihedral + sweep contributions).
+    // Dihedral term: use mean effective dihedral = atan(z_tip / semi_span).
+    // z_tip = gull_a + gull_b + gull_c (evaluating the cubic at eta=1).
+    double z_tip = w.gull_a + w.gull_b + w.gull_c;
+    double eff_dihedral = (w.semi_span > 0) ? std::atan2(z_tip, w.semi_span) : 0.0;
+    double cl_beta_dihedral = -eff_dihedral * CL * AR / (2.0 * (AR + 4.0));
+    // Sweep term: Perkins & Hage swept-wing approximation.
+    double cl_beta_sweep    = -CL * AR * std::tan(w.le_sweep) / (4.0 * (AR + 4.0));
+    ld.cl_beta = (cl_beta_dihedral + cl_beta_sweep) * cfg.getd("cl_beta_scale", 1.0);
+
+    // Cl_r: roll due to yaw rate (Etkin §8.3: ≈ CL/4 for moderate AR).
+    ld.cl_r = 0.25 * CL;
+
+    // Cn_p: yaw from roll rate; swept-back wing → negative (Perkins & Hage).
+    ld.cn_p = -CL * std::tan(w.le_sweep) / 4.0;
+
     return ld;
 }
 

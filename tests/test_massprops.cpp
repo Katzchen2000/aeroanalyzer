@@ -56,6 +56,52 @@ TEST(battery_shift_moves_cg) {
     CHECK(cg_aft > cg_fwd);
 }
 
+// Prop keep-out: heavily-swept wing whose near-axis TE reaches aft of the fixed
+// disk face must produce a negative prop_clearance (gate fires).
+TEST(prop_clearance_fires_on_aft_te) {
+    WingGeometry w;
+    // Very long root chord so TE = root_chord = 0.50 m >> prop face at 0.203/2+0.01=~0.22 m
+    w.root_chord = 0.50; w.tip_chord = 0.10; w.semi_span = 0.60;
+    w.le_sweep = 0.0; w.washout = 0.0;
+    Airfoil af; af.wu = {0.18,0.15,0.12,0.10}; af.wl = {-0.12,-0.10,-0.08,-0.05};
+    af.te_thick = 0.0;
+    w.sections.assign(1, af);
+    geom::loft(w, 20);
+    Config cfg;
+    cfg.set("prop_diameter", "0.203");
+    cfg.set("prop_hub_gap",  "0.010");
+    cfg.set("prop_blade_clear", "0.005");
+    MassProps mp = massprops::compute(w, cfg);
+    // face = 0.50 + 0.010 - 0.005 = 0.505; root TE at 0.50 → cl = 0.505-0.50 = 0.005 > 0
+    // Use a more extreme case: zero sweep, root_chord=0.50, prop face = 0.505 → barely clear
+    // Make root_chord > face to breach: set root_chord=0.60 via re-loft
+    WingGeometry w2;
+    w2.root_chord = 0.60; w2.tip_chord = 0.10; w2.semi_span = 0.60;
+    w2.le_sweep = 0.0; w2.washout = 0.0;
+    w2.sections.assign(1, af);
+    geom::loft(w2, 20);
+    MassProps mp2 = massprops::compute(w2, cfg);
+    // face = 0.60 + 0.010 - 0.005 = 0.605; root TE = 0.60 → cl = 0.005 (just clear)
+    // Increase prop_hub_gap to zero → face = 0.60 - 0.005 = 0.595 < 0.60 → negative
+    cfg.set("prop_hub_gap", "0.0");
+    cfg.set("prop_blade_clear", "0.010");
+    MassProps mp3 = massprops::compute(w2, cfg);
+    // face = 0.60 + 0.0 - 0.010 = 0.590; root TE at x=0.60 → cl = 0.590-0.60 = -0.010
+    CHECK(mp3.prop_clearance < 0.0);
+}
+
+// Prop keep-out: short unswept wing stays clear of the disk.
+TEST(prop_clearance_ok_for_short_wing) {
+    WingGeometry w = rect_wing();  // root_chord=0.20
+    Config cfg;
+    cfg.set("prop_diameter", "0.203");
+    cfg.set("prop_hub_gap",  "0.010");
+    cfg.set("prop_blade_clear", "0.005");
+    // face = 0.20 + 0.010 - 0.005 = 0.205; root TE at x=0.20 → cl = 0.005 > 0
+    MassProps mp = massprops::compute(w, cfg);
+    CHECK(mp.prop_clearance > 0.0);
+}
+
 // Spar clearance is finite and bounded by the local half-thickness.
 TEST(spar_clearance_bounded) {
     WingGeometry w = rect_wing();

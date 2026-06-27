@@ -18,8 +18,8 @@ Evaluator::Evaluator(const Config& cfg) : cfg_(cfg) {
 EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) const {
     EvalResult r;
     r.geom = geom::decode(genes, spec_);
-    // tip trailing edge closes to te_thick_tip_frac (default 0 = watertight tip)
-    r.geom.sections.back().te_thick = cfg_.getd("te_thick_tip_frac", 0.0);
+    r.geom.winglet_taper = cfg_.getd("winglet_taper", 1.0);
+    r.geom.winglet_blend = cfg_.getd("winglet_blend", 0.06);
     geom::loft(r.geom, n_stations_);
     r.mp = massprops::compute(r.geom, cfg_);
     // reporting re-eval (detail) turns on the relaxed-wake pass for exact CDi;
@@ -36,7 +36,12 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     const double q = 0.5 * RHO * V * V;
 
     // ---- objectives (all minimized) ----
-    r.objectives[OBJ_DRAG] = r.aero.CD * q * r.mp.S_ref;     // drag force, N
+    // OBJ_DRAG = CD/CL = inverse L/D (pure aero efficiency, weight-agnostic).
+    // Mass owns the weight axis; drag-force (mass·g/(L/D)) would double-count it.
+    {
+        double cl_eff = std::max(0.05, r.aero.CL);
+        r.objectives[OBJ_DRAG] = r.aero.CD / cl_eff;
+    }
     r.objectives[OBJ_MASS] = r.mp.mass;                      // kg
     double sm_lo = cfg_.getd("sm_band_lo", 0.06);
     double sm_hi = cfg_.getd("sm_band_hi", 0.08);
@@ -46,10 +51,7 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     // ---- constraints -> total violation cv (0 = feasible) ----
     double cv = 0.0;
 
-    // (1) TE thickness clamp (plan §3)
-    double te_min = cfg_.getd("te_thick_min_mm", 0.8) / 1000.0;
-    double te_actual = r.geom.sections[0].te_thick * r.geom.root_chord;
-    if (te_actual < te_min) cv += 50.0 * (te_min - te_actual) / te_min;
+    // (1) TE is always sharp (te_thick=0 from decode); no te gate needed.
 
     // (2) tip Reynolds floor (plan §3)
     double re_min = cfg_.getd("re_tip_min", 100000.0);
@@ -92,6 +94,11 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
         if (hw_ref <= 0.0) hw_ref = 0.014;
         cv += 30.0 * (-r.mp.hw_clearance) / hw_ref;
     }
+    // (18) pusher propeller keep-out: wing TE must stay clear of prop disk
+    if (r.mp.prop_clearance < 0.0) {
+        double prop_r = 0.5 * cfg_.getd("prop_diameter", 0.203);
+        if (prop_r > 0.0) cv += 30.0 * (-r.mp.prop_clearance) / prop_r;
+    }
 
     // (11) static-margin band floor: the OBJ_SM band is only an objective, so
     // the drag-minimizing corner of the front sits below sm_lo (less washout =>
@@ -116,10 +123,14 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     }
     if (min_t < t_floor) cv += 40.0 * (t_floor - min_t) / t_floor;
 
-    // (14) chord-collapse: catches le_bow/te_bow combos that make tip chord negative
-    double chord_min_m = cfg_.getd("chord_min_m", 0.03);
-    for (const auto& s : r.geom.stations)
-        if (s.chord < chord_min_m) cv += 50.0 * (chord_min_m - s.chord) / chord_min_m;
+    // (14) chord-collapse: catches extreme exp/gull combos that make tip chord negative.
+    // Winglet stations get a smaller floor (they're lightly loaded and can be narrow).
+    double chord_min_m    = cfg_.getd("chord_min_m", 0.03);
+    double chord_min_wl_m = cfg_.getd("chord_min_winglet_m", 0.015);
+    for (const auto& s : r.geom.stations) {
+        double floor_m = s.in_winglet ? chord_min_wl_m : chord_min_m;
+        if (s.chord < floor_m) cv += 50.0 * (floor_m - s.chord) / floor_m;
+    }
 
     // (13) surrogate confidence: keep OOD polars from silently passing.
     double conf_threshold = cfg_.getd("confidence_threshold", 0.5);
@@ -134,19 +145,29 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     double adv_pen = cfg_.getd("adverse_yaw_penalty", 50.0);
     if (adv_pen > 0.0 && r.aero.cn_da > 0.0) cv += adv_pen * r.aero.cn_da;
 
-    // (16) dynamic stability: Dutch-roll + phugoid damping gates (opt-in).
-    // Default dynamic_stab_penalty = 0 so metrics are computed and reported
-    // in pareto.csv without affecting the feasible count (feasibility is fragile).
-    // Set dynamic_stab_penalty > 0 to enforce the damping floors.
-    double dyn_pen = cfg_.getd("dynamic_stab_penalty", 0.0);
-    if (dyn_pen > 0.0) {
-        double zdr_min = cfg_.getd("dutch_roll_zeta_min", 0.0);
-        double zph_min = cfg_.getd("phugoid_zeta_min", 0.0);
-        if (r.aero.dutch_roll_zeta < zdr_min)
-            cv += dyn_pen * (zdr_min - r.aero.dutch_roll_zeta);
-        if (r.aero.phugoid_zeta < zph_min)
-            cv += dyn_pen * (zph_min - r.aero.phugoid_zeta);
+    // (16) Dutch-roll damping floor (hard constraint, same pattern as SM floor).
+    // dutch_roll_zeta_min default 0.05 — "good enough" per user requirement.
+    // Set to 0 to disable (reverts to reporting-only behaviour).
+    double zdr_min = cfg_.getd("dutch_roll_zeta_min", 0.05);
+    if (zdr_min > 0.0 && r.aero.dutch_roll_zeta < zdr_min) {
+        double dyn_pen = cfg_.getd("dynamic_stab_penalty", 5.0);
+        cv += dyn_pen * (zdr_min - r.aero.dutch_roll_zeta);
     }
+    // phugoid floor remains opt-in (typically stable by Lanchester)
+    double dyn_pen = cfg_.getd("dynamic_stab_penalty", 5.0);
+    double zph_min = cfg_.getd("phugoid_zeta_min", 0.0);
+    if (dyn_pen > 0.0 && zph_min > 0.0 && r.aero.phugoid_zeta < zph_min)
+        cv += dyn_pen * (zph_min - r.aero.phugoid_zeta);
+
+    // (17) Banked-turn gates (n·CL; no extra panel solve — same deriv model as cruise)
+    // Directional divergence in the turn
+    if (r.aero.cn_beta_turn <= 0.0)
+        cv += 30.0 * (-r.aero.cn_beta_turn + 1e-4);
+    // Dutch-roll in the turn
+    if (zdr_min > 0.0 && r.aero.dutch_roll_zeta_turn < zdr_min)
+        cv += dyn_pen * (zdr_min - r.aero.dutch_roll_zeta_turn);
+    // Tip-stall in the turn
+    if (r.aero.tip_stall_turn) cv += 20.0;
 
     r.cv = cv;
     return r;

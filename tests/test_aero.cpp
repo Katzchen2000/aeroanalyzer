@@ -715,3 +715,28 @@ TEST(dynamic_stability_metrics) {
     double zeta_ph_ref = st.CD / (std::sqrt(2.0) * st.CL);
     CHECK(std::fabs(st.phugoid_zeta - zeta_ph_ref) < 1e-10);
 }
+
+// Winglet CDi credit: a 40° canted winglet raises effective AR (Prandtl-Munk
+// heuristic in aero_panel.cpp:728), so CDi must drop vs cant=0. This is the
+// definitive load-bearing proof the optimizer has a physical reason to keep tips.
+TEST(winglet_reduces_CDi) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    WingGeometry w0 = demo_wing();   // winglet_cant=0 by default
+
+    WingGeometry w1 = demo_wing();
+    w1.winglet_cant = 40.0 * DEG2RAD;
+    w1.winglet_eta  = 0.85;
+    geom::loft(w1, 20);             // re-loft with cant applied
+
+    double alpha = 4.0 * DEG2RAD;
+    MassProps mp0 = massprops::compute(w0, cfg);
+    MassProps mp1 = massprops::compute(w1, cfg);
+    AeroState st0 = potential::solve(w0, mp0, surr, cfg, alpha, 0.0);
+    AeroState st1 = potential::solve(w1, mp1, surr, cfg, alpha, 0.0);
+
+    CHECK(st0.CDi > 0.0);
+    CHECK(st1.CDi < st0.CDi);   // canted winglet → larger AR_eff → less induced drag
+}

@@ -18,13 +18,20 @@ GenomeSpec default_genome() {
     set(G_SEMISPAN, "semi_span_m",   0.45, 0.80);
     set(G_SWEEP,    "le_sweep_deg",   8.0, 30.0);
     set(G_WASHOUT,  "washout_deg",   -6.0,  0.0);
-    set(G_BATTERY,  "battery_x_m",   0.00, 0.22);
-    set(G_TE,       "te_frac",       0.002, 0.010);
-    set(G_MODE,     "mode",          0.0,   1.0);
-    set(G_CS_CHORD, "cs_chord_frac", 0.15,  0.35);
-    set(G_AIL_SPAN, "ail_span_frac", 0.40,  0.80);
-    set(G_LE_BOW,   "le_bow_m",     -0.05,  0.05);
-    set(G_TE_BOW,   "te_bow_m",     -0.05,  0.05);
+    set(G_BATTERY,      "battery_x_m",      0.00, 0.22);
+    set(G_CS_CHORD,     "cs_chord_frac",    0.15, 0.35);
+    set(G_AIL_SPAN,     "ail_span_frac",    0.40, 0.80);
+    set(G_CHORD_EXP,    "chord_exp",        1.0,  2.5);
+    set(G_SWEEP_EXP,    "sweep_exp",        1.0,  3.0);
+    // Gull coefficients dimensionless (×semi_span in loft): a~root slope, b~mid, c~tip
+    // Tightened: max tip height ~16% semi_span (~9°) so gull stays gentle dihedral
+    // and distinct winglet cant carries the CDi credit.
+    set(G_GULL_A,       "gull_a",          -0.05, 0.08);
+    set(G_GULL_B,       "gull_b",          -0.08, 0.04);
+    set(G_GULL_C,       "gull_c",          -0.04, 0.04);
+    // Winglet fold: cant angle drives non-planar CDi credit; eta pins the fold start
+    set(G_WINGLET_CANT, "winglet_cant_deg", 0.0,  80.0);
+    set(G_WINGLET_ETA,  "winglet_eta",      0.75, 0.95);
     // CST bounds identical for every section; aft lower weight drives reflex.
     const double ulo[] = {0.10, 0.10, 0.08, 0.06};
     const double uhi[] = {0.34, 0.34, 0.30, 0.26};
@@ -160,19 +167,24 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec) {
     w.le_sweep      = clamp(G_SWEEP) * DEG2RAD;
     w.washout       = clamp(G_WASHOUT) * DEG2RAD;
     w.battery_x     = clamp(G_BATTERY);
-    w.mode          = (clamp(G_MODE) < 0.5) ? ControlMode::Elevon : ControlMode::Split;
+    // ponytail: box-fit clamp moved to massprops::compute() where battery_len_m is available
+    w.mode          = ControlMode::Elevon;  // G_MODE dropped; always elevon
     w.cs_chord_frac = clamp(G_CS_CHORD);
     w.ail_span_frac = clamp(G_AIL_SPAN);
-    w.le_bow        = clamp(G_LE_BOW);
-    w.te_bow        = clamp(G_TE_BOW);
-    double te = clamp(G_TE);
+    w.chord_exp     = clamp(G_CHORD_EXP);
+    w.sweep_exp     = clamp(G_SWEEP_EXP);
+    w.gull_a        = clamp(G_GULL_A);
+    w.gull_b        = clamp(G_GULL_B);
+    w.gull_c        = clamp(G_GULL_C);
+    w.winglet_cant  = clamp(G_WINGLET_CANT) * DEG2RAD;
+    w.winglet_eta   = clamp(G_WINGLET_ETA);
     w.sections.resize(N_SECTIONS);
     for (int k = 0; k < N_SECTIONS; ++k) {
         w.sections[k].wu = {clamp(G_SEC(k,0,0)), clamp(G_SEC(k,0,1)),
                             clamp(G_SEC(k,0,2)), clamp(G_SEC(k,0,3))};
         w.sections[k].wl = {clamp(G_SEC(k,1,0)), clamp(G_SEC(k,1,1)),
                             clamp(G_SEC(k,1,2)), clamp(G_SEC(k,1,3))};
-        w.sections[k].te_thick = te;
+        w.sections[k].te_thick = 0.0;  // sharp TE everywhere; motor pocket via CAD split-plane
     }
     return w;
 }
@@ -189,23 +201,60 @@ void loft(WingGeometry& w, int n) {
     } else {
         for (int k = 0; k < K; ++k) ETA[k] = (K > 1) ? double(k) / (K - 1) : 0.0;
     }
-    const double b = w.semi_span;
+    const double b      = w.semi_span;
+    const double eta_wl = w.winglet_eta;
+    const double cant   = w.winglet_cant;
+    const double blend  = std::max(1e-9, std::min(w.winglet_blend, 1.0 - eta_wl));
+    // Cosine-spaced flat arc coords
     std::vector<double> y(n);
     for (int i = 0; i < n; ++i) {
         double th = PI * i / (n - 1);
         y[i] = b * 0.5 * (1.0 - std::cos(th));
     }
+    // Pass 1: physical (yp, z_arr) and local dihedral angle via angle integration.
+    auto get_phi = [&](double t) {
+        double phi_gull = std::atan(w.gull_a + 2.0 * w.gull_b * t + 3.0 * w.gull_c * t * t);
+        double u = (t - eta_wl) / blend;
+        double ss = std::max(0.0, std::min(1.0, u));
+        double smoothstep01 = ss * ss * (3.0 - 2.0 * ss);
+        return phi_gull + cant * smoothstep01;
+    };
+    std::vector<double> yp(n), z_arr(n), phi_arr(n);
+    yp[0] = 0.0;
+    z_arr[0] = 0.0;
+    phi_arr[0] = get_phi(0.0);
+    for (int i = 1; i < n; ++i) {
+        double d_arc = y[i] - y[i-1];
+        double t_prev = (b > 0.0) ? y[i-1] / b : 0.0;
+        double t = (b > 0.0) ? y[i] / b : 0.0;
+        double t_mid = 0.5 * (t_prev + t);
+        double phi_mid = get_phi(t_mid);
+        yp[i] = yp[i-1] + d_arc * std::cos(phi_mid);
+        z_arr[i] = z_arr[i-1] + d_arc * std::sin(phi_mid);
+        phi_arr[i] = get_phi(t);
+    }
     for (int i = 0; i < n; ++i) {
         double t = (b > 0) ? y[i] / b : 0.0;
         Station s;
-        s.y = y[i];
-        s.chord = w.root_chord + (w.tip_chord - w.root_chord) * t;
-        // LE bow: parabolic deviation from sheared sweep
-        double bow_u = 4.0 * t * (1.0 - t);
-        s.x_le  = y[i] * std::tan(w.le_sweep) + w.le_bow * bow_u;
-        s.chord += w.te_bow * bow_u;   // te_bow augments effective chord
+        s.y        = yp[i];
+        s.z        = z_arr[i];
+        s.dihedral = phi_arr[i];
+        s.eta      = t;
+        // Power-law taper: chord(t) = root - (root-tip)*t^exp  (exp=1 → linear)
+        double te = std::pow(t, w.chord_exp);
+        s.chord = w.root_chord - (w.root_chord - w.tip_chord) * te;
+        // Power-law (crescent) sweep: x_le(t) = semi_span*tan(sweep)*t^exp
+        double se = std::pow(t, w.sweep_exp);
+        s.x_le  = b * std::tan(w.le_sweep) * se;
         s.twist = w.washout * t;
-        s.z = 0.0;
+        if (cant >= 1e-6 && t > eta_wl) {
+            s.in_winglet = true;
+            // taper winglet chord toward tip (winglet_taper=1 → no change)
+            if (w.winglet_taper != 1.0) {
+                double frac = (t - eta_wl) / (1.0 - eta_wl);
+                s.chord *= 1.0 + (w.winglet_taper - 1.0) * frac;
+            }
+        }
         // piecewise linear blend between K control sections
         int seg = K - 2;
         for (int k = 0; k < K - 1; ++k)
@@ -228,8 +277,8 @@ void loft(WingGeometry& w, int n) {
                         + tl      * (j < a1.wl.size() ? a1.wl[j] : 0.0);
         }
         s.af.te_thick = (1.0-tl) * a0.te_thick + tl * a1.te_thick;
-        double y_lo = (i == 0)     ? y[0]     : 0.5 * (y[i-1] + y[i]);
-        double y_hi = (i == n - 1) ? y[n - 1] : 0.5 * (y[i]   + y[i+1]);
+        double y_lo = (i == 0)     ? yp[0]     : 0.5 * (yp[i-1] + yp[i]);
+        double y_hi = (i == n - 1) ? yp[n - 1] : 0.5 * (yp[i]   + yp[i+1]);
         s.width = y_hi - y_lo;
         w.stations[i] = s;
     }

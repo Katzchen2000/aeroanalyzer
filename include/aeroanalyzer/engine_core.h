@@ -42,8 +42,11 @@ struct Station {
     double chord  = 0.0;   // m
     double x_le   = 0.0;   // leading-edge x, m (sweep offset)
     double z      = 0.0;   // dihedral offset, m
-    double twist  = 0.0;   // local incidence (washout), rad
-    double width  = 0.0;   // spanwise strip width for integration, m
+    double twist    = 0.0;   // local incidence (washout), rad
+    double width    = 0.0;   // spanwise strip width for integration, m
+    double dihedral = 0.0;   // local section normal tilt, rad (0=flat, π/2=vertical)
+    double eta      = 0.0;   // normalised span parameter t=y_flat/semi_span
+    bool in_winglet = false;  // true for fold stations beyond winglet_eta
     Airfoil af;            // lofted section shape at this station (root->tip blend)
 };
 
@@ -54,10 +57,17 @@ struct WingGeometry {
     double tip_chord  = 0.13;  // m
     double le_sweep   = 0.0;   // rad (leading-edge sweep)
     double washout    = 0.0;   // rad (tip twist, negative = washout)
-    double le_bow     = 0.0;   // LE parabolic bow amplitude, m
-    double te_bow     = 0.0;   // TE chord augmentation bow, m
+    double chord_exp  = 1.0;   // taper power-law exponent (1 = linear)
+    double sweep_exp  = 1.0;   // LE sweep power-law exponent (1 = linear crescent)
+    double gull_a     = 0.0;   // gull dihedral: z(η)=b*(a·η+b·η²+c·η³), dimensionless
+    double gull_b     = 0.0;   // gull quadratic coeff, dimensionless
+    double gull_c     = 0.0;   // gull cubic coeff, dimensionless
+    double winglet_cant   = 0.0;  // winglet fold cant angle, rad (0=flat, π/2=vertical)
+    double winglet_eta    = 0.85; // winglet fold start, fraction of semi_span [0.75,0.95]
+    double winglet_taper  = 1.0;  // chord scale at winglet tip (1=untapered, 0.5=half chord)
+    double winglet_blend  = 0.06; // smoothstep band width for fold, fraction of span
     std::vector<Airfoil> sections;  // K control sections; loft() blends piecewise
-    ControlMode mode = ControlMode::Elevon;
+    ControlMode mode = ControlMode::Elevon;  // ponytail: fixed; G_MODE gene dropped
     double battery_x     = 0.05;  // battery-box CG x location, m (CG trim handle)
     double cs_chord_frac = 0.25;  // control-surface chord fraction [0.15, 0.35]
     double ail_span_frac = 0.60;  // aileron inboard edge, fraction of semi-span [0.40, 0.80]
@@ -74,9 +84,15 @@ struct MassProps {
     double b_full   = 0.0;  // full span, m
     double AR       = 0.0;  // aspect ratio
     double volume   = 0.0;  // structural volume (shell+infill), m^3
-    double spar_clearance = 1.0;  // min spar-to-OML clearance, m (neg = breach)
-    double hw_clearance   = 1.0;  // min hardware-to-OML clearance, m (neg = breach)
+    double spar_clearance  = 1.0;  // min spar-to-OML clearance, m (neg = breach)
+    double hw_clearance    = 1.0;  // min hardware-to-OML clearance, m (neg = breach)
+    double prop_clearance  = 1.0;  // min wing-TE to prop disk, m (neg = intrusion)
     double Izz            = 0.0;  // yaw moment of inertia about CG, kg*m^2
+    double Ixx            = 0.0;  // roll moment of inertia about CG, kg*m^2
+    // Battery box geometry (report/CAD only; point-mass model unchanged).
+    // ponytail: y/z are report-only; add a fit-check gate when those matter.
+    double batt_cx = 0.0, batt_cy = 0.0, batt_cz = 0.0;  // box center, m
+    double batt_lx = 0.0, batt_ly = 0.0, batt_lz = 0.0;  // L x W x H, m
 };
 
 // ---- aerodynamic operating-point result ---------------------------------
@@ -102,6 +118,10 @@ struct AeroState {
     std::vector<double> cl_local;  // per-station local lift coefficient
     bool tip_stall = false;
     bool trimmed = false;     // did the trim solve converge?
+    // Banked-turn predictions (n·CL_cruise; zero extra panel solve)
+    double cn_beta_turn        = 0.0; // weathercock stability at turn CL
+    double dutch_roll_zeta_turn = 0.0; // dutch-roll damping at turn CL
+    bool   tip_stall_turn      = false; // tip-stall proxy at load factor
 };
 
 // ---- GA candidate -------------------------------------------------------

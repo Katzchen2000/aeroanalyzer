@@ -10,24 +10,30 @@ namespace aero {
 namespace geom {
 
 // Design-variable layout. Order matters — keep in sync with decode().
-// Planform genes (fixed indices 0-11):
-constexpr int G_ROOT     = 0;   // root chord, m
-constexpr int G_TAPER    = 1;   // tip/root chord ratio
-constexpr int G_SEMISPAN = 2;   // half span, m
-constexpr int G_SWEEP    = 3;   // leading-edge sweep, deg
-constexpr int G_WASHOUT  = 4;   // tip twist, deg (negative = washout)
-constexpr int G_BATTERY  = 5;   // battery-box CG x, m
-constexpr int G_TE       = 6;   // trailing-edge thickness, fraction of chord
-constexpr int G_MODE     = 7;   // <0.5 Elevon, else Split
-constexpr int G_CS_CHORD = 8;   // control-surface chord fraction [0.15, 0.35]
-constexpr int G_AIL_SPAN = 9;   // aileron inboard edge, fraction of semi-span [0.40, 0.80]
-constexpr int G_LE_BOW   = 10;  // LE parabolic bow amplitude, m
-constexpr int G_TE_BOW   = 11;  // TE chord augmentation bow, m
+// Planform genes (fixed indices 0-14); G_SEC() addresses the CST block at 15+.
+// Dropped: G_TE (sharp everywhere; motor pocket via CAD split), G_MODE (fixed Elevon).
+// Added:   G_WINGLET_CANT, G_WINGLET_ETA — organic tip fold.
+// Gull coefficients are now DIMENSIONLESS fractions of semi_span (×b in loft).
+constexpr int G_ROOT         = 0;   // root chord, m
+constexpr int G_TAPER        = 1;   // tip/root chord ratio
+constexpr int G_SEMISPAN     = 2;   // half span, m
+constexpr int G_SWEEP        = 3;   // leading-edge sweep, deg
+constexpr int G_WASHOUT      = 4;   // tip twist, deg (negative = washout)
+constexpr int G_BATTERY      = 5;   // battery-box CG x, m
+constexpr int G_CS_CHORD     = 6;   // control-surface chord fraction [0.15, 0.35]
+constexpr int G_AIL_SPAN     = 7;   // aileron inboard edge, fraction of semi-span [0.40, 0.80]
+constexpr int G_CHORD_EXP    = 8;   // taper power-law exponent (1=linear, >1 curved)
+constexpr int G_SWEEP_EXP    = 9;   // LE sweep power-law exponent (1=linear, >1 crescent)
+constexpr int G_GULL_A       = 10;  // gull dihedral: z(η)=b*(a*η+b*η²+c*η³), dimensionless
+constexpr int G_GULL_B       = 11;  // gull quadratic coeff, dimensionless
+constexpr int G_GULL_C       = 12;  // gull cubic coeff, dimensionless
+constexpr int G_WINGLET_CANT = 13;  // winglet cant angle, deg [0, 80]
+constexpr int G_WINGLET_ETA  = 14;  // winglet fold start, fraction of semi-span [0.75, 0.95]
 
-constexpr int N_PLANFORM    = 12;
+constexpr int N_PLANFORM    = 15;
 constexpr int N_CST_PER_SEC = 8;   // 4 wu + 4 wl per section
 constexpr int N_SECTIONS    = 5;
-constexpr int N_GENES = N_PLANFORM + N_SECTIONS * N_CST_PER_SEC;  // 52
+constexpr int N_GENES = N_PLANFORM + N_SECTIONS * N_CST_PER_SEC;  // 55
 
 // Canonical η breakpoints for the 5 control sections.
 constexpr double SECTION_ETA[5] = {0.0, 0.5, 0.75, 0.875, 1.0};

@@ -85,26 +85,27 @@ TEST(loft_spanwise) {
     CHECK(w.stations.back().x_le > w.stations.front().x_le);  // swept aft
 }
 
-// 5-section genome: N_GENES == 52, G_SEC addressing correct.
+// 5-section genome: N_GENES == 55, G_SEC addressing correct.
 TEST(genome_5_sections) {
-    CHECK(geom::N_GENES == 52);
+    CHECK(geom::N_GENES == 55);
     geom::GenomeSpec spec = geom::default_genome();
-    CHECK((int)spec.size() == 52);
+    CHECK((int)spec.size() == 55);
     // all sections share the same CST bounds
     for (int k = 1; k < geom::N_SECTIONS; ++k) {
         CHECK_NEAR(spec.lo[geom::G_SEC(k,0,0)], spec.lo[geom::G_SEC(0,0,0)], 1e-12);
         CHECK_NEAR(spec.hi[geom::G_SEC(k,1,3)], spec.hi[geom::G_SEC(0,1,3)], 1e-12);
     }
-    // G_LE_BOW / G_TE_BOW exist and are symmetric
-    CHECK_NEAR(spec.lo[geom::G_LE_BOW], -spec.hi[geom::G_LE_BOW], 1e-12);
+    // G_CHORD_EXP / G_SWEEP_EXP lower bound is 1.0 (linear is the minimum)
+    CHECK_NEAR(spec.lo[geom::G_CHORD_EXP], 1.0, 1e-12);
+    CHECK_NEAR(spec.lo[geom::G_SWEEP_EXP], 1.0, 1e-12);
 }
 
 // loft() piecewise blend: knot points reproduce control sections exactly;
-// inner segment blends correctly; le_bow parabola is applied.
+// inner segment blends correctly.
 TEST(loft_5section_blend) {
     WingGeometry w;
     w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.le_bow = 0.0; w.te_bow = 0.0;
+    w.chord_exp = 1.0; w.sweep_exp = 1.0;  // linear (default)
     // 5 control sections with distinct wu[0] values
     w.sections.resize(5);
     for (int k = 0; k < 5; ++k) {
@@ -136,37 +137,89 @@ TEST(loft_5section_blend) {
         CHECK_NEAR(w.stations[idx].af.wu[j], w.sections[2].wu[j], 1e-9);
 }
 
-// le_bow parabola: midspan x_le offset is exactly le_bow.
-TEST(loft_le_bow) {
+// Power-law taper: chord_exp=1 reproduces linear; exp>1 curves inboard.
+TEST(loft_power_law_taper) {
     WingGeometry w;
     w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
     w.le_sweep = 0.0; w.washout = 0.0;
-    w.le_bow = 0.03; w.te_bow = 0.0;
+    w.chord_exp = 1.0; w.sweep_exp = 1.0;
     w.sections.resize(1);
     geom::loft(w, 41);
-    // midspan station nearest η=0.5
+    // midspan nearest η=0.5
     int mid = 0; double best = 1e9;
     for (int i = 0; i < (int)w.stations.size(); ++i) {
         double d = std::fabs(w.stations[i].y - 0.5 * w.semi_span);
         if (d < best) { best = d; mid = i; }
     }
-    // parabola value at η=0.5: 4*0.5*0.5 = 1.0 → x_le = le_bow
-    CHECK_NEAR(w.stations[mid].x_le, w.le_bow, 1e-3);
+    double chord_lin = w.root_chord - (w.root_chord - w.tip_chord) * 0.5;
+    CHECK_NEAR(w.stations[mid].chord, chord_lin, 1e-3);
+
+    // exp=2: tip half is narrowed (curved inboard taper)
+    w.chord_exp = 2.0;
+    geom::loft(w, 41);
+    mid = 0; best = 1e9;
+    for (int i = 0; i < (int)w.stations.size(); ++i) {
+        double d = std::fabs(w.stations[i].y - 0.5 * w.semi_span);
+        if (d < best) { best = d; mid = i; }
+    }
+    double chord_exp2 = w.root_chord - (w.root_chord - w.tip_chord) * 0.25; // t^2 at η=0.5
+    CHECK_NEAR(w.stations[mid].chord, chord_exp2, 1e-3);
 }
 
-// te_bow < 0 makes tip chord narrower; gate should trigger in evaluate.
-// Here just verify the chord formula: chord at midspan decreases with te_bow < 0.
-TEST(loft_te_bow_chord) {
+// Gull dihedral: coeffs are dimensionless; z(η)=semi_span*(a*η+b*η²+c*η³).
+TEST(loft_gull_dihedral) {
     WingGeometry w;
     w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.le_bow = 0.0; w.te_bow = -0.05;
+    w.chord_exp = 1.0; w.sweep_exp = 1.0; w.le_sweep = 0.0; w.washout = 0.0;
+    w.gull_a = 0.05; w.gull_b = -0.03; w.gull_c = 0.01;
     w.sections.resize(1);
-    geom::loft(w, 41);
-    int mid = 0; double best = 1e9;
-    for (int i = 0; i < (int)w.stations.size(); ++i) {
-        double d = std::fabs(w.stations[i].y - 0.5 * w.semi_span);
-        if (d < best) { best = d; mid = i; }
+    geom::loft(w, 20);
+    // coefficients dimensionless; multiply by semi_span to get metres
+    double z_tip_expected = w.semi_span * (w.gull_a + w.gull_b + w.gull_c);
+    CHECK_NEAR(w.stations.back().z, z_tip_expected, 1e-3);
+    CHECK_NEAR(w.stations.front().z, 0.0, 1e-9);  // root at z=0
+}
+
+// decode() forces all section te_thick = 0 (sharp TE everywhere).
+TEST(decode_sharp_te) {
+    geom::GenomeSpec spec = geom::default_genome();
+    // use lo-bound genome (all values at lower bound = valid, minimal wing)
+    std::vector<double> genes(spec.size());
+    for (int i = 0; i < (int)spec.size(); ++i) genes[i] = spec.lo[i];
+    WingGeometry w = geom::decode(genes, spec);
+    for (int k = 0; k < (int)w.sections.size(); ++k)
+        CHECK_NEAR(w.sections[k].te_thick, 0.0, 1e-12);
+    // CST at x=1: class_fn(x=1) = 0 so cst_upper/lower both zero regardless of weights
+    for (int k = 0; k < (int)w.sections.size(); ++k) {
+        double gap = geom::cst_upper(w.sections[k], 1.0) - geom::cst_lower(w.sections[k], 1.0);
+        CHECK_NEAR(gap, 0.0, 1e-9);
     }
-    double chord_no_bow = 0.25 + (0.13 - 0.25) * 0.5;   // linear taper at η=0.5
-    CHECK(w.stations[mid].chord < chord_no_bow);
+}
+
+// Winglet fold: at 80 deg cant, outer-station z increment >> y increment.
+TEST(loft_winglet_fold) {
+    WingGeometry w;
+    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
+    w.chord_exp = 1.0; w.sweep_exp = 1.0; w.le_sweep = 0.0; w.washout = 0.0;
+    w.winglet_eta  = 0.80;
+    w.winglet_cant = 80.0 * DEG2RAD;
+    w.sections.resize(1);
+    geom::loft(w, 100);
+    // Find the station just inboard of fold and the tip
+    const Station& tip  = w.stations.back();
+    const Station& root = w.stations.front();
+    // Tip physical y should be << semi_span (cant compresses horizontal span)
+    CHECK(tip.y < 0.95 * w.semi_span);          // fold pulled it in
+    // Tip z should be substantially above root z (fold went up)
+    CHECK(tip.z > 0.05 * w.semi_span);           // at least 5% span height
+    // Root stays at z=0
+    CHECK_NEAR(root.z, 0.0, 1e-9);
+
+    // Kink check: per-station dihedral must have no jump across eta_wl
+    double max_diff = 0.0;
+    for (size_t i = 1; i < w.stations.size(); ++i) {
+        double diff = std::fabs(w.stations[i].dihedral - w.stations[i-1].dihedral);
+        if (diff > max_diff) max_diff = diff;
+    }
+    CHECK(max_diff < w.winglet_cant / 3.0);
 }

@@ -2,6 +2,8 @@
 #include "aeroanalyzer/geom.h"
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
+#include <iostream>
 
 namespace aero {
 namespace massprops {
@@ -52,7 +54,7 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     double struct_m = 0.0;     // kg (one half)
     double struct_mx = 0.0;    // kg*m
     // strip cache for Izz (computed after x_cg is known)
-    struct StripMass { double dm, x_cen, y; };
+    struct StripMass { double dm, x_cen, y, z; };
     std::vector<StripMass> strips;
     strips.reserve(w.stations.size());
     for (const auto& s : w.stations) {
@@ -70,20 +72,26 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
         vol_half  += dvol;
         struct_m  += dm;
         struct_mx += dm * x_centroid;
-        strips.push_back({dm, x_centroid, s.y});
+        strips.push_back({dm, x_centroid, s.y, s.z});
     }
     mp.volume = 2.0 * vol_half;
 
     // ---- point masses (plan §2, §4) ----
     auto chord_at = [&](double t) {
-        return w.root_chord + (w.tip_chord - w.root_chord) * t;
+        return w.root_chord - (w.root_chord - w.tip_chord) * std::pow(t, w.chord_exp);
     };
-    auto xle_at = [&](double t) { return t * w.semi_span * std::tan(w.le_sweep); };
+    auto xle_at = [&](double t) {
+        return w.semi_span * std::tan(w.le_sweep) * std::pow(t, w.sweep_exp);
+    };
 
     double m_motor = cfg.getd("mass_motor", 0.060);
     double x_motor = w.root_chord;                       // Y=0 trailing edge
-    double m_batt  = cfg.getd("mass_battery", 0.210);
-    double x_batt  = w.battery_x + 0.035;                // box CG (70mm long)
+    double m_batt   = cfg.getd("mass_battery",    0.210);
+    double batt_len = cfg.getd("battery_len_m",   0.070);
+    double batt_wid = cfg.getd("battery_width_m", 0.035);
+    double batt_hgt = cfg.getd("battery_height_m",0.015);
+    double batt_x0  = std::min(w.battery_x, std::max(0.0, w.root_chord - batt_len));
+    double x_batt   = batt_x0 + 0.5 * batt_len;          // box CG
     double m_avi   = cfg.getd("target_mass_aux", 0.045); // 20%-50% span block
     double t_avi   = 0.35;
     double x_avi   = xle_at(t_avi) + 0.30 * chord_at(t_avi);
@@ -101,17 +109,20 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     mp.mass = m_struct_full + m_pts;
     mp.x_cg = (mp.mass > 0) ? (mx_struct_full + mx_pts) / mp.mass : 0.0;
 
-    // ---- yaw inertia Izz about CG (for Dutch-roll approximation) -----------
+    // ---- yaw/roll inertia Izz, Ixx about CG -----------------------------------
     // Structural strips: each half-station at ±y contributes factor 2.
-    double Izz = 0.0;
+    // Ixx = Σ dm*(y²+z²); for small dihedral z≈0 so Ixx ≈ Σ dm*y² (spanwise only).
+    double Izz = 0.0, Ixx = 0.0;
     for (const auto& sm : strips) {
         double dx = sm.x_cen - mp.x_cg;
         Izz += 2.0 * sm.dm * (dx * dx + sm.y * sm.y);
+        Ixx += 2.0 * sm.dm * (sm.y * sm.y + sm.z * sm.z);
     }
     // Point masses (motor + battery at CL; servos at ±y_srv).
     auto addIzz = [&](double m, double x, double y_pm) {
         double dx = x - mp.x_cg;
         Izz += m * (dx * dx + y_pm * y_pm);
+        Ixx += m * y_pm * y_pm;
     };
     addIzz(m_motor, x_motor, 0.0);                        // centerline
     addIzz(m_batt,  x_batt,  0.0);                        // centerline
@@ -119,6 +130,7 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     addIzz(m_srv, x_srv,  t_srv * w.semi_span);           // right servo
     addIzz(m_srv, x_srv, -t_srv * w.semi_span);           // left servo
     mp.Izz = Izz;
+    mp.Ixx = Ixx;
 
     // ---- analytic spar clearance (plan §4) ----
     // clearance = local half-thickness at the spar's chordwise station - radius.
@@ -168,15 +180,47 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
                                - geom::cst_lower(w.sections[0], 0.80)) * w.root_chord;
     double mot_clear = half_t_mot - motor_r;
 
-    // Avionics block at t=0.35, 30% chord: check half-thickness >= avionics_half_h.
-    double avi_hh    = cfg.getd("avionics_half_h", 0.012);
-    double t_avi_hw  = 0.35;
-    double chord_avi = w.root_chord + (w.tip_chord - w.root_chord) * t_avi_hw;
-    double half_t_avi = 0.5 * (geom::cst_upper(w.sections[0], 0.30)
-                                - geom::cst_lower(w.sections[0], 0.30)) * chord_avi;
+    // Avionics block at t=0.35, 30% chord: use lofted station for accurate section shape.
+    double avi_hh = cfg.getd("avionics_half_h", 0.012);
+    const Station* avi_st = w.stations.empty() ? nullptr : &w.stations[0];
+    {
+        double best_dt = 1e9;
+        for (const auto& s : w.stations) {
+            double dt = std::fabs(s.y / (w.semi_span > 0 ? w.semi_span : 1.0) - 0.35);
+            if (dt < best_dt) { best_dt = dt; avi_st = &s; }
+        }
+    }
+    double half_t_avi = avi_st
+        ? 0.5 * (geom::cst_upper(avi_st->af, 0.30) - geom::cst_lower(avi_st->af, 0.30)) * avi_st->chord
+        : 0.0;
     double avi_clear = half_t_avi - avi_hh;
 
     mp.hw_clearance = std::min(mot_clear, avi_clear);
+
+    // ---- Pusher propeller keep-out ----------------------------------------
+    // Disk is FIXED at x = root_chord + hub_gap, centered on thrust axis (y=z=0).
+    // Every station inside the disk radius must have its TE forward of the disk face.
+    // Previous code anchored to the wing's own aftmost TE → clearance was always ≥0.
+    double prop_r    = 0.5 * cfg.getd("prop_diameter", 0.203);
+    double hub_gap   = cfg.getd("prop_hub_gap", 0.010);
+    double blade_clr = cfg.getd("prop_blade_clear", 0.005);
+    double face = w.root_chord + hub_gap - blade_clr;  // fixed disk face (x)
+    double prop_cl = 1.0;
+    const Station* prop_bind = nullptr;
+    for (const auto& s : w.stations) {
+        if (std::sqrt(s.y*s.y + s.z*s.z) < prop_r) {
+            double cl = face - (s.x_le + s.chord);   // >0 = TE forward of disk
+            if (cl < prop_cl) { prop_cl = cl; prop_bind = &s; }
+        }
+    }
+    mp.prop_clearance = prop_cl;
+    if (std::getenv("AERO_CV_DIAG") && prop_bind)
+        std::cerr << "[prop] clearance=" << prop_cl << " m  binding y="
+                  << prop_bind->y << " z=" << prop_bind->z << "\n";
+
+    // Battery box geometry for reporting/CAD (centerline placement, z=0).
+    mp.batt_cx = x_batt; mp.batt_cy = 0.0; mp.batt_cz = 0.0;
+    mp.batt_lx = batt_len; mp.batt_ly = batt_wid; mp.batt_lz = batt_hgt;
 
     return mp;
 }
