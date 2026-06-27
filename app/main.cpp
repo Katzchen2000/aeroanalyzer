@@ -15,6 +15,72 @@
 using namespace aero;
 
 namespace {
+void print_aero_report(const std::string& stem, const EvalResult& r,
+                       const std::string& aero_model) {
+    using std::cout; using std::fixed; using std::setprecision; using std::setw;
+    constexpr double RAD2DEG_L = 180.0 / 3.14159265358979323846;
+    auto w = [&](const char* label, double val, int dec, const char* unit="") {
+        cout << "  " << std::left << setw(34) << label
+             << std::right << setw(8) << fixed << setprecision(dec) << val
+             << "  " << unit << "\n";
+    };
+    cout << "\n================================================================\n"
+         << "  AERODYNAMIC REPORT \xe2\x80\x94  " << stem << "\n"
+         << "================================================================\n";
+
+    std::string solver_desc = (aero_model == "vlm")
+        ? "analytic VLM" : "panel solver, relaxed wake";
+    cout << "\n--- Trim condition (" << solver_desc << ") ---\n";
+    w("Trim alpha",          r.aero.alpha * RAD2DEG_L, 3, "deg");
+    w("Lift coefficient CL", r.aero.CL,    3);
+    w("Induced drag CDi",    r.aero.CDi,   3);
+    w("Oswald efficiency e", r.aero.e,     3);
+    w("Mean aero chord",     r.mp.mac,     3, "m");
+    w("CG position",         r.mp.x_cg,   3, "m");
+    w("Neutral point",       r.aero.x_np,  3, "m");
+    w("Static margin",       r.aero.static_margin * 100.0, 3, "% MAC");
+
+    cout << "\n--- Performance (NSGA-II Pareto front) ---\n";
+    w("Inverse L/D (CD/CL)", r.objectives[OBJ_DRAG], 3);
+    w("Total mass",          r.objectives[OBJ_MASS], 3, "kg");
+    w("Full span",           r.mp.b_full,  3, "m");
+    w("Aspect ratio",        r.mp.AR,      3);
+    w("Root chord",          r.geom.root_chord, 3, "m");
+    w("Tip chord",           r.geom.tip_chord,  3, "m");
+    w("LE sweep",            r.geom.le_sweep * RAD2DEG_L, 3, "deg");
+    w("Washout",             r.geom.washout * RAD2DEG_L,  3, "deg");
+    w("Total drag coeff CD", r.aero.CD,    3);
+    w("Hinge moment",        r.aero.hinge_moment, 3, "kg*cm");
+    cout << "  " << std::left << setw(34) << "Control mode"
+         << (r.geom.mode == ControlMode::Elevon ? "elevon" : "split") << "\n";
+
+    cout << "\n--- Lateral / directional dynamics ---\n";
+    w("Roll authority pb/2V", r.aero.roll_helix, 3);
+
+    cout << "\n--- Dynamic stability ---\n";
+    w("Dutch-roll damp. zeta", r.aero.dutch_roll_zeta, 3);
+    w("Phugoid damp. zeta",    r.aero.phugoid_zeta,    3);
+    cout << "    Dutch-roll: ("
+         << (r.aero.dutch_roll_zeta >= 0.05 ? "stable"
+             : r.aero.dutch_roll_zeta >= 0.0 ? "lightly damped" : "divergent")
+         << ")\n";
+    cout << "    Phugoid:    ("
+         << (r.aero.phugoid_zeta >= 0.05 ? "stable"
+             : r.aero.phugoid_zeta >= 0.0 ? "lightly damped" : "divergent")
+         << ")\n";
+
+    cout << "\n--- Banked-turn stability (2g / 60deg bank, no extra solve) ---\n";
+    w("Cn_beta at turn CL",    r.aero.cn_beta_turn,        3, "/rad");
+    w("Dutch-roll zeta (turn)", r.aero.dutch_roll_zeta_turn, 3);
+    cout << "  " << std::left << setw(34) << "Tip-stall in turn"
+         << ": " << (r.aero.tip_stall_turn ? "YES" : "no") << "\n";
+    cout << "    Cn_beta(turn): ("
+         << (r.aero.cn_beta_turn > 0.0 ? "stable" : "UNSTABLE") << ")   "
+         << "Dutch-roll: ("
+         << (r.aero.dutch_roll_zeta_turn >= 0.0 ? "stable" : "divergent") << ")\n";
+    cout << "\n";
+}
+
 void print_dash(const EngineDashboard& d) {
     if (d.generation % 10 != 0 && d.generation != 0) return;
     std::cout << "gen " << std::setw(4) << d.generation
@@ -220,6 +286,7 @@ int main(int argc, char** argv) {
                 sc << "batt_box_dims   = " << r.mp.batt_lx << " x "
                    << r.mp.batt_ly << " x " << r.mp.batt_lz << "  (L x W x H, m)\n";
             }
+            print_aero_report(stem, r, aero_model);
             std::cout << "  " << std::setw(9) << pk.name
                       << " : L/D " << std::setprecision(3)
                       << (r.objectives[OBJ_DRAG] > 0 ? 1.0/r.objectives[OBJ_DRAG] : 0.0)
