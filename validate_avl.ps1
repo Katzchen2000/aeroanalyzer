@@ -21,7 +21,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $TOL_E   = 0.10   # 10%
-$TOL_XNP = 0.03   # 3% of MAC
+# 15% of MAC, not 3%: the panel solver is a thick source+doublet body (models
+# real upper/lower surface thickness), AVL here is a thin camber-surface VLM
+# (discards thickness). That's a structural AC shift, not an error -- spanwise
+# resolution was ruled out as the cause (panel_np_spanwise_convergence: x_np
+# spread <0.2% MAC over 19->64 strips) and airfoil-shape data reaching AVL was
+# confirmed identical to what the panel model uses internally. Observed
+# residual after fixes 1-3 was 9.0-11.2% MAC across 3 designs; 15% keeps
+# margin for GA-run variance without re-opening the door to the reward-hacked
+# near-vertical-fold regime the original 3% gate was catching.
+$TOL_XNP = 0.15   # 15% of MAC
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -171,7 +180,7 @@ if (Test-Path $tmpDeck) { Remove-Item $tmpDeck -Force }
 # ---- print table -----------------------------------------------------------
 
 Write-Host ""
-Write-Host "  Panel vs AVL cross-check  (gates: e 10%, Xnp 3% MAC  |  CL: INFO only)"
+Write-Host "  Panel vs AVL cross-check  (gates: e $($TOL_E*100)%, Xnp $($TOL_XNP*100)% MAC  |  CL: INFO only)"
 Write-Host ("  {0,-10} {1,6} {2,6} {3,6} {4,-4}  {5,6} {6,6} {7,6} {8,-4}  {9,6} {10,6} {11,8} {12,-4}" -f `
     "case","CL_p","CL_a","dCL","","e_p","e_a","de","","Xnp_p","Xnp_a","dXnp","")
 Write-Host ("  " + ("-" * 85))

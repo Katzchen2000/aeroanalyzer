@@ -6,6 +6,7 @@
 #include <array>
 #include <vector>
 #include <algorithm>
+#include <utility>
 
 namespace aero {
 namespace avl {
@@ -54,43 +55,53 @@ bool write_case(const std::string& stem, const WingGeometry& w,
     o << "#\n";
     o << "SURFACE\n";
     o << "Wing\n";
-    o << "12  1.0   24  -1.5       | Nchord Cspace Nspan Sspace\n";
+    o << "12  1.0   48  -1.5       | Nchord Cspace Nspan Sspace\n";
     o << "YDUPLICATE\n0.0\n";
     o << "SCALE\n1.0 1.0 1.0\n";
     o << "TRANSLATE\n0.0 0.0 0.0\n";
     o << "ANGLE\n0.0\n#\n";
 
-    // K SECTION entries using canonical η breakpoints; geometry read through the
-    // shared smooth-curve evaluators (single source of truth with geom::loft()).
-    for (int k = 0; k < K && k < 5; ++k) {
-        double eta   = geom::SECTION_ETA[k];
+    // phys_y/phys_z at an arbitrary eta, off the arc-integrated station table
+    // (same source loft() uses for the panel mesh, i.e. the true projected span
+    // position under dihedral, not a straight-line eta*semi_span guess).
+    auto station_yz = [&](double eta) -> std::pair<double, double> {
+        if (w.stations.empty()) return {eta * w.semi_span, 0.0};
+        if (eta <= w.stations.front().eta)
+            return {w.stations.front().y, w.stations.front().z};
+        if (eta >= w.stations.back().eta)
+            return {w.stations.back().y, w.stations.back().z};
+        int idx = 0;
+        while (idx < (int)w.stations.size() && w.stations[idx].eta < eta) idx++;
+        const auto& s0 = w.stations[idx - 1];
+        const auto& s1 = w.stations[idx];
+        double denom = s1.eta - s0.eta;
+        double f = (denom > 1e-9) ? (eta - s0.eta) / denom : 0.0;
+        return {s0.y + f * (s1.y - s0.y), s0.z + f * (s1.z - s0.z)};
+    };
+
+    // AVL linearly interpolates xle/chord/twist/dihedral BETWEEN consecutive
+    // SECTION entries -- 5 canonical breakpoints (the CST airfoil-blend
+    // stations) undersample the actual smooth Bezier chord/sweep/twist/dihedral
+    // curves and silently straight-line-cut whatever curvature falls between
+    // them (worst near the tip, where the gene search concentrates). Sample the
+    // planform at NSEC breakpoints instead, reusing the nearest of the 5
+    // canonical airfoils per breakpoint -- airfoil-shape blend resolution is
+    // unchanged, only the planform edges/dihedral gain resolution.
+    constexpr int NSEC = 21;
+    for (int i = 0; i < NSEC; ++i) {
+        double eta   = (double)i / (NSEC - 1);
         double xle   = geom::xle_at(w, eta);
         double chord = geom::chord_at(w, eta);
         double twist = geom::twist_at(w, eta) * RAD2DEG;
-        double phys_y = 0.0;
-        double phys_z = 0.0;
-        if (w.stations.empty()) {
-            phys_y = eta * w.semi_span;
-            phys_z = 0.0;
-        } else if (eta <= w.stations.front().eta) {
-            phys_y = w.stations.front().y;
-            phys_z = w.stations.front().z;
-        } else if (eta >= w.stations.back().eta) {
-            phys_y = w.stations.back().y;
-            phys_z = w.stations.back().z;
-        } else {
-            int idx = 0;
-            while (idx < (int)w.stations.size() && w.stations[idx].eta < eta) {
-                idx++;
-            }
-            const auto& s0 = w.stations[idx - 1];
-            const auto& s1 = w.stations[idx];
-            double denom = s1.eta - s0.eta;
-            double f = (denom > 1e-9) ? (eta - s0.eta) / denom : 0.0;
-            phys_y = s0.y + f * (s1.y - s0.y);
-            phys_z = s0.z + f * (s1.z - s0.z);
+        auto [phys_y, phys_z] = station_yz(eta);
+
+        int nearest = 0;
+        double best = 1e300;
+        for (int k = 0; k < K && k < 5; ++k) {
+            double d = std::fabs(eta - geom::SECTION_ETA[k]);
+            if (d < best) { best = d; nearest = k; }
         }
-        std::string dat = stem + "_s" + std::to_string(k) + "_" + sec_label[k] + ".dat";
+        std::string dat = stem + "_s" + std::to_string(nearest) + "_" + sec_label[nearest] + ".dat";
         o << "SECTION\n";
         o << xle << " " << phys_y << " " << phys_z << " " << chord << " " << twist << "\n";
         o << "AFILE\n" << dat << "\n#\n";

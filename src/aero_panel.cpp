@@ -665,27 +665,42 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
         Eigen::VectorXd mu = solve_mu(Vinf, flux);
         panel_CL = trefftz_CL(mu, gmax, &gamma);
 
-        // Neutral point: circulation-weighted quarter-chord (sweep-aware).
+        // Neutral point: quarter-chord centroid of the ALPHA-DERIVATIVE loading,
+        // not the total circulation. Total loading mixes a "basic" component
+        // (twist/camber-driven, alpha-independent) with the "additional"
+        // (alpha-driven) component; only the additional component's centroid is
+        // the classical aerodynamic centre (dCm/dCL = 0 point) -- that's the
+        // textbook definition of neutral point. Centroiding the TOTAL loading at
+        // one alpha instead conflates the two and is biased by however much of
+        // the trim lift comes from washout/camber vs alpha response. Confirmed
+        // against AVL: this was a ~17-19% MAC bias on washed-out, reflexed,
+        // high-alpha-trim flying wings (the exact regime this optimizer targets).
+        // Frozen-wake probe (skip ensure_system -> reuse the cached LU
+        // factorization) makes the second solve a cheap back-substitution, same
+        // trick already used for the trim Jacobian (stability.cpp).
+        constexpr double NP_PROBE_H = 2.0 * DEG2RAD;
+        Vec3 Vinf2(std::cos(alpha + NP_PROBE_H), 0.0, std::sin(alpha + NP_PROBE_H));
+        double flux2 = 0.0;
+        Eigen::VectorXd mu2 = solve_mu(Vinf2, flux2);
+        double gmax2 = 0.0;
+        std::vector<double> gamma2;
+        trefftz_CL(mu2, gmax2, &gamma2);
+
         double sg = 0.0, sgx = 0.0, sgabs = 0.0;
         double xqc_lo = 1e300, xqc_hi = -1e300;
         for (int sp = 0; sp < m.n_strips; ++sp) {
-            double wsp = gamma[sp] * m.strip_dy[sp];
+            double dgam = gamma2[sp] - gamma[sp];   // additional-loading circulation
+            double wsp = dgam * m.strip_dy[sp];
             sg  += wsp;
             sgx += wsp * m.strip_xqc[sp];
             sgabs += std::fabs(wsp);
             xqc_lo = std::min(xqc_lo, m.strip_xqc[sp]);
             xqc_hi = std::max(xqc_hi, m.strip_xqc[sp]);
         }
-        // The load-weighted centroid is only meaningful when there is net
-        // circulation. At low diagnostic alpha a washed-out / reflexed wing can
-        // carry near-zero NET load over large +/- local strip loads, so |sg|
-        // collapses while sgx stays finite -- a bare |sg|>1e-12 guard then flings
-        // x_np to +/-20 (a finite but DIVERGENT value that poisons the Pareto
-        // sort). Two guards: (1) require net load to be a non-trivial fraction of
-        // the gross absolute load, else keep the bounded geometric-AC fallback;
-        // (2) a true load centroid of quarter-chord points must lie within their
-        // own range, so clamp -- this stays exact for coherent loadings and
-        // repairs the mixed-sign cancellation case unconditionally.
+        // Same guards as before, now applied to the delta loading: only trust
+        // the centroid when there's a non-trivial net additional-lift response,
+        // and clamp to the physical quarter-chord range (repairs mixed-sign
+        // cancellation cases unconditionally).
         if (sgabs > 1e-12 && std::fabs(sg) > 1e-3 * sgabs) {
             x_np = sgx / sg;
             if (xqc_hi >= xqc_lo)
@@ -752,7 +767,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     // ponytail: flag set by stability::trim() high-alpha pass only; zero cost on normal cruise solve
     bool post_stall_cap = cfg.geti("post_stall_cap", 0) != 0;
     double sumL_cap = 0.0, sumLx_cap = 0.0, sumLabs_cap = 0.0;
-    bool root_capped = false, tip_capped = false;
+    bool root_capped = false, tip_capped = false, any_capped = false;
     double xqc_cap_lo = 1e300, xqc_cap_hi = -1e300;
 
     // Strips ARE the half-wing strips (root..tip), one per [station i, i+1].
@@ -791,6 +806,7 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
             xqc_cap_lo = std::min(xqc_cap_lo, m.strip_xqc[sp]);
             xqc_cap_hi = std::max(xqc_cap_hi, m.strip_xqc[sp]);
             if (capped) {
+                any_capped = true;
                 if (t < 0.4) root_capped = true;
                 if (t > 0.6) tip_capped  = true;
             }
@@ -814,8 +830,11 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     if (!post_stall_cap)
         st.cn_da = control::adverse_yaw_cn_da(w, mp, surr, st.cl_local, a_ref, cfg);
 
-    // Post-stall cap override: replace x_np and tip_stall with capped-load results (M5)
-    if (post_stall_cap) {
+    // Post-stall cap override: replace x_np and tip_stall with capped-load results (M5).
+    // Only when the cap actually clipped something -- at low alpha, where no strip
+    // reaches cl_max, this is a true no-op and must leave the (more accurate,
+    // alpha-derivative-based) x_np computed above untouched.
+    if (post_stall_cap && any_capped) {
         // Same guard as the Gamma-weighted NP block: require non-trivial net load
         if (sumLabs_cap > 1e-12 && std::fabs(sumL_cap) > 1e-3 * sumLabs_cap) {
             double xnp_cap = sumLx_cap / sumL_cap;
@@ -824,6 +843,8 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
             st.x_np = xnp_cap;
             st.static_margin = (mp.mac > 0) ? (xnp_cap - mp.x_cg) / mp.mac : 0.0;
         }
+    }
+    if (post_stall_cap) {
         // ponytail: tips-before-root is the pitch-up stall precursor; both capped = symmetric, benign
         st.tip_stall = tip_capped && !root_capped;
     }

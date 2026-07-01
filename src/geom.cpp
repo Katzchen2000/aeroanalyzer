@@ -52,12 +52,14 @@ GenomeSpec default_genome(const Config& cfg) {
     }
 
     // Dihedral curve: local curve angle Bezier, deg. CP0 pinned to 0 (root
-    // flat), CP1..CP6 are genes. Wide upper bound (85) lets the curve rise to
-    // a near-vertical organic tip smoothly -- no discrete winglet gene needed.
+    // flat), CP1..CP6 are genes. Capped at 30 deg (was 85) -- near-vertical
+    // folds fall outside the Prandtl-Munk nonplanar CDi correction's valid
+    // regime (aero_panel.cpp) and the GA exploited that gap. decode() also
+    // enforces monotonicity so the curve can't fold then unfold.
     for (int i = 1; i < NCP_DIH; ++i) {
         char nm[24];
         std::snprintf(nm, sizeof(nm), "dih_cp%d_deg", i);
-        set(G_DIH_CP + (i - 1), nm, -10.0, 85.0);
+        set(G_DIH_CP + (i - 1), nm, -10.0, 30.0);
     }
 
     set(G_BATTERY,  "battery_x_m",   0.00, 0.22);
@@ -242,19 +244,31 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec, const 
     WingGeometry w;
     w.semi_span = clamp(G_SEMISPAN);
 
+    // ponytail: monotonic control points -> monotonic Bezier curve (convex-hull
+    // property) -- cheapest way to forbid chord flare-back / sweep swing-forward
+    // / dihedral fold-then-unfold without a separate penalty/constraint system.
     w.chord_cp.resize(NCP_CHORD);
-    for (int i = 0; i < NCP_CHORD; ++i) w.chord_cp[i] = clamp(G_CHORD_CP + i);
+    for (int i = 0; i < NCP_CHORD; ++i) {
+        w.chord_cp[i] = clamp(G_CHORD_CP + i);
+        if (i > 0) w.chord_cp[i] = std::min(w.chord_cp[i], w.chord_cp[i - 1]);  // non-increasing (taper)
+    }
 
     w.sweep_cp.resize(NCP_SWEEP);
     w.sweep_cp[0] = 0.0;   // root LE pinned at x_le=0
-    for (int i = 1; i < NCP_SWEEP; ++i) w.sweep_cp[i] = clamp(G_SWEEP_CP + (i - 1));
+    for (int i = 1; i < NCP_SWEEP; ++i) {
+        w.sweep_cp[i] = clamp(G_SWEEP_CP + (i - 1));
+        w.sweep_cp[i] = std::max(w.sweep_cp[i], w.sweep_cp[i - 1]);  // non-decreasing (no forward swing)
+    }
 
     w.twist_cp.resize(NCP_TWIST);
     for (int i = 0; i < NCP_TWIST; ++i) w.twist_cp[i] = clamp(G_TWIST_CP + i) * DEG2RAD;
 
     w.dih_cp.resize(NCP_DIH);
     w.dih_cp[0] = 0.0;   // root dihedral pinned flat
-    for (int i = 1; i < NCP_DIH; ++i) w.dih_cp[i] = clamp(G_DIH_CP + (i - 1)) * DEG2RAD;
+    for (int i = 1; i < NCP_DIH; ++i) {
+        w.dih_cp[i] = clamp(G_DIH_CP + (i - 1)) * DEG2RAD;
+        w.dih_cp[i] = std::max(w.dih_cp[i], w.dih_cp[i - 1]);  // non-decreasing (no fold-then-unfold)
+    }
 
     w.battery_x     = clamp(G_BATTERY);
     // ponytail: box-fit clamp moved to massprops::compute() where battery_len_m is available
@@ -376,7 +390,11 @@ void planform(const WingGeometry& w, double& S_ref, double& mac,
     S_ref = 2.0 * S_half;
     mac = (S_half > 0) ? mac_num / S_half : w.root_chord;
     x_mac_le = (S_half > 0) ? xle_num / S_half : 0.0;
-    b_full = 2.0 * w.semi_span;
+    // ponytail: b_full must be the projected span (station.y, arc-integrated
+    // via cos(dihedral) in loft()), not 2*semi_span -- that's the arc-length
+    // parametrization coordinate, which overstates span whenever dihedral is
+    // nonzero and silently inflates AR/CDi credit for folded designs.
+    b_full = w.stations.empty() ? 2.0 * w.semi_span : 2.0 * w.stations.back().y;
     AR = (S_ref > 0) ? (b_full * b_full) / S_ref : 0.0;
 }
 

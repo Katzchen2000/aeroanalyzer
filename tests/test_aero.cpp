@@ -276,6 +276,43 @@ TEST(panel_chordwise_convergence) {
     CHECK((hi - lo) / lo < 0.08);               // converged: <8% spread across nc (was >300%)
 }
 
+// x_np spanwise-station convergence: the AVL cross-check pans a much finer
+// spanwise mesh (Nspan=48) than the GA-time panel solve (n_stations=20, 19
+// strips). On a curved (Bezier sweep/dihedral/taper) planform, an
+// under-resolved strip count could bias the Gamma-weighted quarter-chord
+// centroid that x_np is built from (aero_panel.cpp ~663-707). Sweep
+// n_stations the same way panel_chordwise_convergence sweeps nc, on a wing
+// with real curvature (unlike rect_wing/demo_wing's straight-line taper).
+TEST(panel_np_spanwise_convergence) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "10"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    double lo = 1e9, hi = -1e9;
+    double mac_ref = 0.0;
+    for (int nst : {20, 32, 48, 64}) {
+        WingGeometry w;
+        w.semi_span = 0.45;
+        geom::set_linear_planform(w, 0.19, 0.075, 0.0, 0.0);
+        w.chord_cp = {0.19, 0.17, 0.14, 0.11, 0.09, 0.075};        // non-increasing taper
+        w.sweep_cp = {0.0, 0.10, 0.25, 0.38, 0.42, 0.44};          // non-decreasing, curved
+        w.dih_cp   = {0.0, 0.5*DEG2RAD, 2.0*DEG2RAD, 5.0*DEG2RAD,
+                      10.0*DEG2RAD, 16.0*DEG2RAD, 22.0*DEG2RAD};    // non-decreasing gull rise
+        Airfoil af; af.wu = {0.16, 0.13, 0.10, 0.07};
+        af.wl = {-0.10, -0.07, -0.02, 0.04};
+        af.te_thick = 0.003;
+        w.sections.assign(1, af);
+        w.battery_x = 0.05;
+        geom::loft(w, nst);
+
+        MassProps mp = massprops::compute(w, cfg);
+        double x_np = potential::solve(w, mp, surr, cfg, 6.0 * DEG2RAD, 0.0).x_np;
+        mac_ref = mp.mac;
+        lo = std::min(lo, x_np); hi = std::max(hi, x_np);
+    }
+    CHECK((hi - lo) / mac_ref < 0.01);   // converged: x_np spread <1% MAC across nst
+}
+
 // ---- Panel-mode counterparts of the core M3 analytic gates ----------------
 // The gates higher up (induced_drag_consistency, lift_increases_with_alpha,
 // trim_converges, panel_lift_slope_matches_prandtl) all run the DEFAULT solver
