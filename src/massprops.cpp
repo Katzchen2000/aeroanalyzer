@@ -77,12 +77,11 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     mp.volume = 2.0 * vol_half;
 
     // ---- point masses (plan §2, §4) ----
-    auto chord_at = [&](double t) {
-        return w.root_chord - (w.root_chord - w.tip_chord) * std::pow(t, w.chord_exp);
-    };
-    auto xle_at = [&](double t) {
-        return w.semi_span * std::tan(w.le_sweep) * std::pow(t, w.sweep_exp);
-    };
+    // Single source of truth: read the smooth spanwise curves via geom::*_at,
+    // never re-derive chord/x_le locally (that duplication used to silently
+    // drift from the wing the aero solver actually lofted).
+    auto chord_at = [&](double t) { return geom::chord_at(w, t); };
+    auto xle_at   = [&](double t) { return geom::xle_at(w, t); };
 
     double m_motor = cfg.getd("mass_motor", 0.060);
     double x_motor = w.root_chord;                       // Y=0 trailing edge
@@ -171,14 +170,9 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
     // ponytail: battery-fit check omitted (plan names motor + avionics); add when
     //           battery box dimensions become a design variable.
 
-    // ponytail: motor (root) + avionics keep-outs use the root section; the
-    // lofted spanwise variation is second-order for these fixed-spot clearance
-    // checks. Use the lofted station section if avionics placement gets tuned.
-    // Motor at root TE: check half-thickness at 80% chord >= motor radius.
-    double motor_r   = 0.5 * cfg.getd("motor_diameter", 0.028);
-    double half_t_mot = 0.5 * (geom::cst_upper(w.sections[0], 0.80)
-                               - geom::cst_lower(w.sections[0], 0.80)) * w.root_chord;
-    double mot_clear = half_t_mot - motor_r;
+    // Motor sits in a local blunt TE boss at the root (CAD plane-split; see
+    // config note), NOT inside the sharp-TE airfoil thickness — so there is no
+    // airfoil-thickness gate for it. hw_clearance is the avionics check only.
 
     // Avionics block at t=0.35, 30% chord: use lofted station for accurate section shape.
     double avi_hh = cfg.getd("avionics_half_h", 0.012);
@@ -195,7 +189,7 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
         : 0.0;
     double avi_clear = half_t_avi - avi_hh;
 
-    mp.hw_clearance = std::min(mot_clear, avi_clear);
+    mp.hw_clearance = avi_clear;
 
     // ---- Pusher propeller keep-out ----------------------------------------
     // Disk is FIXED at x = root_chord + hub_gap, centered on thrust axis (y=z=0).

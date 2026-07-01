@@ -32,8 +32,8 @@ TEST(oswald_in_range) {
 
 static WingGeometry demo_wing() {
     WingGeometry w;
-    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.le_sweep = 18.0 * DEG2RAD; w.washout = -3.0 * DEG2RAD;
+    w.semi_span = 0.6;
+    geom::set_linear_planform(w, 0.25, 0.13, 18.0 * DEG2RAD, -3.0 * DEG2RAD);
     Airfoil af; af.wu = {0.20, 0.17, 0.14, 0.11};
     af.wl = {-0.12, -0.09, -0.02, 0.06};   // slight reflex
     af.te_thick = 0.004;
@@ -97,9 +97,8 @@ TEST(sm_objective_band) {
 static WingGeometry rect_wing(double chord, double AR, int nst) {
     WingGeometry w;
     double b_full = AR * chord;              // rectangular: AR = b/c
-    w.root_chord = chord; w.tip_chord = chord;
     w.semi_span = 0.5 * b_full;
-    w.le_sweep = 0.0; w.washout = 0.0;
+    geom::set_linear_planform(w, chord, chord, 0.0, 0.0);
     Airfoil af; af.wu = { 0.12, 0.12, 0.12, 0.12};  // symmetric -> alpha_L0 ~ 0
     af.wl = {-0.12,-0.12,-0.12,-0.12};
     af.te_thick = 0.002;
@@ -214,7 +213,8 @@ TEST(panel_washout_lift_slope_survives) {
 
     WingGeometry w0 = rect_wing(0.20, 5.0, 24);   // no washout
     WingGeometry ww = rect_wing(0.20, 5.0, 24);
-    ww.washout = -3.0 * DEG2RAD; geom::loft(ww, 24);
+    geom::set_linear_planform(ww, ww.root_chord, ww.tip_chord, ww.le_sweep, -3.0 * DEG2RAD);
+    geom::loft(ww, 24);
 
     MassProps mp0 = massprops::compute(w0, cfg);
     MassProps mpw = massprops::compute(ww, cfg);
@@ -238,7 +238,8 @@ TEST(panel_washout_loading_sign) {
 
     WingGeometry w0 = rect_wing(0.20, 5.0, 24);
     WingGeometry ww = rect_wing(0.20, 5.0, 24);
-    ww.washout = -4.0 * DEG2RAD; geom::loft(ww, 24);
+    geom::set_linear_planform(ww, ww.root_chord, ww.tip_chord, ww.le_sweep, -4.0 * DEG2RAD);
+    geom::loft(ww, 24);
     MassProps mp0 = massprops::compute(w0, cfg);
     MassProps mpw = massprops::compute(ww, cfg);
 
@@ -400,7 +401,8 @@ TEST(panel_np_migrates_forward_at_high_alpha) {
 
     // Swept, no washout: tip strips load up first -> tip stall -> forward NP migration
     WingGeometry w = demo_wing();
-    w.washout = 0.0;   // remove washout to exaggerate tip loading
+    // remove washout to exaggerate tip loading
+    geom::set_linear_planform(w, w.root_chord, w.tip_chord, w.le_sweep, 0.0);
     geom::loft(w, 20);
     MassProps mp = massprops::compute(w, cfg);
 
@@ -428,12 +430,14 @@ TEST(panel_tip_stall_watchdog) {
 
     // Prone: high sweep, no washout -> tips load up, stall before root
     WingGeometry wprone = demo_wing();
-    wprone.washout = 0.0; geom::loft(wprone, 20);
+    geom::set_linear_planform(wprone, wprone.root_chord, wprone.tip_chord, wprone.le_sweep, 0.0);
+    geom::loft(wprone, 20);
     MassProps mpp = massprops::compute(wprone, cfg);
 
     // Safe: same wing but with generous washout to unload tips
     WingGeometry wsafe = demo_wing();
-    wsafe.washout = -5.0 * DEG2RAD; geom::loft(wsafe, 20);
+    geom::set_linear_planform(wsafe, wsafe.root_chord, wsafe.tip_chord, wsafe.le_sweep, -5.0 * DEG2RAD);
+    geom::loft(wsafe, 20);
     MassProps mps = massprops::compute(wsafe, cfg);
 
     Config cfgCap = cfg; cfgCap.set("post_stall_cap", "1");
@@ -457,7 +461,8 @@ TEST(panel_trim_xnp_high_physical) {
     viscous::Surrogate surr; surr.load("", cfg);
 
     WingGeometry w = demo_wing();
-    w.washout = 0.0; geom::loft(w, 20);
+    geom::set_linear_planform(w, w.root_chord, w.tip_chord, w.le_sweep, 0.0);
+    geom::loft(w, 20);
     MassProps mp = massprops::compute(w, cfg);
 
     AeroState st = stability::trim(w, mp, surr, cfg);
@@ -559,20 +564,23 @@ TEST(hinge_worstcase_elevon_exceeds_pitch_only) {
     CHECK(st1.hinge_moment > 0.0);
 }
 
-// Hardware keep-out: thin section breaches, deep section clears.
+// Hardware keep-out: thin section breaches avionics, deep section clears.
+// Motor is not gated here (M8 addendum): it lives in a blunt TE boss/pocket
+// at the root, not the airfoil thickness, so hw_clearance is avionics-only.
 TEST(hw_keepout_fires_and_clears) {
     Config cfg;
-    // Flat plate (near-zero thickness): motor can't fit.
+    // Flat plate (near-zero thickness) across every section: avionics can't fit.
     WingGeometry w_thin = demo_wing();
-    w_thin.sections[0].wu = {0.01, 0.01, 0.01, 0.01};
-    w_thin.sections[0].wl = {-0.01, -0.01, -0.01, -0.01};
+    for (auto& sec : w_thin.sections) {
+        sec.wu = {0.01, 0.01, 0.01, 0.01};
+        sec.wl = {-0.01, -0.01, -0.01, -0.01};
+    }
     geom::loft(w_thin, 20);
-    cfg.set("motor_diameter", "0.028");
     cfg.set("avionics_half_h", "0.012");
     MassProps mp_thin = massprops::compute(w_thin, cfg);
     CHECK(mp_thin.hw_clearance < 0.0);
 
-    // Standard demo wing is thicker — should clear the motor.
+    // Standard demo wing is thicker — should clear avionics.
     WingGeometry w_thick = demo_wing();
     geom::loft(w_thick, 20);
     MassProps mp_thick = massprops::compute(w_thick, cfg);
@@ -651,7 +659,8 @@ TEST(adverse_yaw_cn_da_sign_and_differential) {
     cfg.set("aileron_deflect_max_deg", "10");  // modest throw: stay in the drag bucket
     viscous::Surrogate surr; surr.load("", cfg);
     WingGeometry w = demo_wing();
-    w.washout = 0.0;            // tips carry positive lift across the aileron band
+    // remove washout so tips carry positive lift across the aileron band
+    geom::set_linear_planform(w, w.root_chord, w.tip_chord, w.le_sweep, 0.0);
     w.ail_span_frac = 0.5;
     geom::loft(w, 20);
     MassProps mp = massprops::compute(w, cfg);
@@ -716,20 +725,25 @@ TEST(dynamic_stability_metrics) {
     CHECK(std::fabs(st.phugoid_zeta - zeta_ph_ref) < 1e-10);
 }
 
-// Winglet CDi credit: a 40° canted winglet raises effective AR (Prandtl-Munk
-// heuristic in aero_panel.cpp:728), so CDi must drop vs cant=0. This is the
-// definitive load-bearing proof the optimizer has a physical reason to keep tips.
+// Organic raised-tip CDi credit: a smooth dihedral curve that rises steeply near
+// the tip raises effective AR (Prandtl-Munk heuristic in aero_panel.cpp, keyed to
+// nonplanar_h), so CDi must drop vs a flat wing. No discrete winglet device or
+// crease — the tip rise is just the tail of the same continuous dihedral curve.
+// This is the definitive load-bearing proof the optimizer has a physical reason
+// to keep tips.
 TEST(winglet_reduces_CDi) {
     Config cfg; cfg.set("aero_model", "panel");
     cfg.set("panel_chordwise", "6");
     viscous::Surrogate surr; surr.load("", cfg);
 
-    WingGeometry w0 = demo_wing();   // winglet_cant=0 by default
+    WingGeometry w0 = demo_wing();   // flat dihedral curve (all zero) by default
 
     WingGeometry w1 = demo_wing();
-    w1.winglet_cant = 40.0 * DEG2RAD;
-    w1.winglet_eta  = 0.85;
-    geom::loft(w1, 20);             // re-loft with cant applied
+    // Smooth dihedral-angle curve: flat inboard, rising to a steep organic tip.
+    w1.dih_cp = {0.0, 0.0, 5.0 * DEG2RAD, 15.0 * DEG2RAD,
+                 30.0 * DEG2RAD, 40.0 * DEG2RAD, 45.0 * DEG2RAD};
+    geom::loft(w1, 20);             // re-loft with the raised tip applied
+    CHECK(w1.nonplanar_h > 0.0);    // curve actually left the plane
 
     double alpha = 4.0 * DEG2RAD;
     MassProps mp0 = massprops::compute(w0, cfg);
@@ -738,5 +752,5 @@ TEST(winglet_reduces_CDi) {
     AeroState st1 = potential::solve(w1, mp1, surr, cfg, alpha, 0.0);
 
     CHECK(st0.CDi > 0.0);
-    CHECK(st1.CDi < st0.CDi);   // canted winglet → larger AR_eff → less induced drag
+    CHECK(st1.CDi < st0.CDi);   // raised organic tip → larger AR_eff → less induced drag
 }

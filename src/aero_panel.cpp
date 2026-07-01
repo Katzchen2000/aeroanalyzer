@@ -314,10 +314,11 @@ std::uint64_t geom_sig_panel(const WingGeometry& w, int nc, bool half_cosine) {
         std::uint64_t b; std::memcpy(&b, &d, sizeof(b));
         h = (h ^ b) * 1099511628211ull;
     };
-    mix(w.root_chord); mix(w.tip_chord); mix(w.semi_span);
-    mix(w.le_sweep); mix(w.washout); mix(w.chord_exp); mix(w.sweep_exp);
-    mix(w.gull_a); mix(w.gull_b); mix(w.gull_c);
-    mix(w.winglet_cant); mix(w.winglet_eta);
+    mix(w.semi_span);
+    for (double v : w.chord_cp) mix(v);
+    for (double v : w.sweep_cp) mix(v);
+    for (double v : w.twist_cp) mix(v);
+    for (double v : w.dih_cp)   mix(v);
     for (const auto& sec : w.sections) {
         mix(sec.te_thick);
         for (double v : sec.wu) mix(v);
@@ -720,12 +721,12 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     // Total CL including the control-surface increment.
     st.CL = panel_CL + pc.CLde * delta_e;
 
-    // Non-planar CDi: Prandtl-Munk heuristic. Only count the winglet portion
-    // (fold-to-tip height), not gull dihedral; gull doesn't act as an end-plate.
-    // ponytail: analytical h avoids the station scan; upgrade to Trefftz if needed.
+    // Non-planar CDi: Prandtl-Munk heuristic, keyed to the smooth curve's own
+    // vertical extent (organic tip -> no discrete winglet height to read).
+    // ponytail: nonplanar_h=max|z| treats a broad gentle gull and a tight raised
+    // tip of equal height the same; upgrade to Trefftz if that distinction bites.
     {
-        double b_half = mp.b_full * 0.5;
-        double h      = (1.0 - w.winglet_eta) * b_half * std::sin(w.winglet_cant);
+        double h      = w.nonplanar_h;
         double k_wl   = cfg.getd("winglet_eff_factor", 0.45);
         double b_eff  = mp.b_full + k_wl * 2.0 * h;
         double AR_eff = (mp.S_ref > 0) ? b_eff * b_eff / mp.S_ref : AR;

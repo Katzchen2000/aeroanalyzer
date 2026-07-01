@@ -16,7 +16,9 @@ bool write_case(const std::string& stem, const WingGeometry& w,
 
 // Writes <stem>_3d.csv directly from lofted stations (no AVL intermediary).
 // Produces one contour per station × 2 sides; usable in Fusion360/SolidWorks.
-bool write_3d_csv(const std::string& stem, const WingGeometry& w);
+// Opens a blunt TE boss near the root (motor_boss_diameter/_span_frac in cfg),
+// tapering to the sharp TE outboard.
+bool write_3d_csv(const std::string& stem, const WingGeometry& w, const Config& cfg);
 
 // Writes <stem>.stl: ASCII STL mesh from lofted stations (watertight half-wings
 // + root/tip caps) plus a prop-disk triangle fan as a visual marker.

@@ -18,8 +18,6 @@ Evaluator::Evaluator(const Config& cfg) : cfg_(cfg) {
 EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) const {
     EvalResult r;
     r.geom = geom::decode(genes, spec_, cfg_);
-    r.geom.winglet_taper = cfg_.getd("winglet_taper", 1.0);
-    r.geom.winglet_blend = cfg_.getd("winglet_blend", 0.06);
     geom::loft(r.geom, n_stations_);
     r.mp = massprops::compute(r.geom, cfg_);
     // reporting re-eval (detail) turns on the relaxed-wake pass for exact CDi;
@@ -88,10 +86,12 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     double helix_min = cfg_.getd("roll_helix_min", 0.05);
     if (helix_min > 0.0 && r.aero.roll_helix < helix_min)
         cv += 30.0 * (helix_min - r.aero.roll_helix) / helix_min;
-    // (10) hardware keep-out: motor + avionics must fit in section (M6)
+    // (10) hardware keep-out: avionics must fit in section (M6). Motor lives in
+    // a blunt TE boss (CAD plane-split), not the airfoil thickness, so it is
+    // not gated here.
     if (r.mp.hw_clearance < 0.0) {
-        double hw_ref = cfg_.getd("motor_diameter", 0.028) * 0.5;
-        if (hw_ref <= 0.0) hw_ref = 0.014;
+        double hw_ref = cfg_.getd("avionics_half_h", 0.012);
+        if (hw_ref <= 0.0) hw_ref = 0.012;
         cv += 30.0 * (-r.mp.hw_clearance) / hw_ref;
     }
     // (18) pusher propeller keep-out: wing TE must stay clear of prop disk

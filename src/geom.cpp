@@ -1,11 +1,20 @@
 #include "aeroanalyzer/geom.h"
 #include <Eigen/Dense>
 #include <cmath>
+#include <algorithm>
 
 namespace aero {
 namespace geom {
 
+namespace {
+// Local dihedral angle above this threshold marks a station "in_winglet" for
+// the relaxed chord floor (evaluate.cpp constraint 14). Organic tips have no
+// discrete winglet device, so this is just a steep-curve marker, not a gene.
+constexpr double WINGLET_DIH_THRESHOLD_DEG = 60.0;
+}  // namespace
+
 GenomeSpec default_genome(const Config& cfg) {
+    (void)cfg;  // no toggles left; every gene is unconditional
     GenomeSpec g;
     g.lo.resize(N_GENES);
     g.hi.resize(N_GENES);
@@ -13,25 +22,48 @@ GenomeSpec default_genome(const Config& cfg) {
     auto set = [&](int i, const char* nm, double lo, double hi) {
         g.names[i] = nm; g.lo[i] = lo; g.hi[i] = hi;
     };
-    set(G_ROOT,     "root_chord_m",  0.18, 0.35);
-    set(G_TAPER,    "taper_ratio",   0.30, 0.90);
-    set(G_SEMISPAN, "semi_span_m",   0.45, 0.80);
-    set(G_SWEEP,    "le_sweep_deg",   8.0, 30.0);
-    set(G_WASHOUT,  "washout_deg",   -6.0,  0.0);
-    set(G_BATTERY,      "battery_x_m",      0.00, 0.22);
-    set(G_CS_CHORD,     "cs_chord_frac",    0.15, 0.35);
-    set(G_AIL_SPAN,     "ail_span_frac",    0.40, 0.80);
-    set(G_CHORD_EXP,    "chord_exp",        1.0,  2.5);
-    set(G_SWEEP_EXP,    "sweep_exp",        1.0,  3.0);
-    // Gull coefficients dimensionless (×semi_span in loft): a~root slope, b~mid, c~tip
-    // Tightened: max tip height ~16% semi_span (~9°) so gull stays gentle dihedral
-    // and distinct winglet cant carries the CDi credit.
-    set(G_GULL_A,       "gull_a",          -0.05, 0.08);
-    set(G_GULL_B,       "gull_b",          -0.08, 0.04);
-    set(G_GULL_C,       "gull_c",          -0.04, 0.04);
-    // Winglet fold: cant angle drives non-planar CDi credit; eta pins the fold start
-    set(G_WINGLET_CANT, "winglet_cant_deg", 0.0,  80.0);
-    set(G_WINGLET_ETA,  "winglet_eta",      0.75, 0.95);
+    set(G_SEMISPAN, "semi_span_m", 0.45, 0.80);
+
+    // Chord curve: CP0 = root chord (m); CP1..CP5 free organic control points (m).
+    // Positive control points keep the curve inside the convex hull -> chord
+    // stays positive everywhere without a monotone straitjacket.
+    set(G_CHORD_CP + 0, "chord_cp0_root_m", 0.18, 0.35);
+    for (int i = 1; i < NCP_CHORD; ++i) {
+        char nm[24];
+        std::snprintf(nm, sizeof(nm), "chord_cp%d_m", i);
+        set(G_CHORD_CP + i, nm, 0.03, 0.35);
+    }
+
+    // Sweep curve: x_le(eta)/semi_span Bezier; CP0 pinned to 0 (root LE at x=0),
+    // CP1..CP5 are genes. Small negative allows a gentle forward inner LE;
+    // larger positive lets the curve sweep aft/crescent toward the tip.
+    for (int i = 1; i < NCP_SWEEP; ++i) {
+        char nm[24];
+        std::snprintf(nm, sizeof(nm), "sweep_cp%d", i);
+        set(G_SWEEP_CP + (i - 1), nm, -0.05, 0.80);
+    }
+
+    // Twist curve: fully free per control point, deg. CP0 = root incidence,
+    // CP5 = tip; interior points give non-linear washout (the whole point).
+    for (int i = 0; i < NCP_TWIST; ++i) {
+        char nm[24];
+        std::snprintf(nm, sizeof(nm), "twist_cp%d_deg", i);
+        set(G_TWIST_CP + i, nm, -8.0, 4.0);
+    }
+
+    // Dihedral curve: local curve angle Bezier, deg. CP0 pinned to 0 (root
+    // flat), CP1..CP6 are genes. Wide upper bound (85) lets the curve rise to
+    // a near-vertical organic tip smoothly -- no discrete winglet gene needed.
+    for (int i = 1; i < NCP_DIH; ++i) {
+        char nm[24];
+        std::snprintf(nm, sizeof(nm), "dih_cp%d_deg", i);
+        set(G_DIH_CP + (i - 1), nm, -10.0, 85.0);
+    }
+
+    set(G_BATTERY,  "battery_x_m",   0.00, 0.22);
+    set(G_CS_CHORD, "cs_chord_frac", 0.15, 0.35);
+    set(G_AIL_SPAN, "ail_span_frac", 0.40, 0.80);
+
     // CST bounds identical for every section; aft lower weight drives reflex.
     const double ulo[] = {0.10, 0.10, 0.08, 0.06};
     const double uhi[] = {0.34, 0.34, 0.30, 0.26};
@@ -49,29 +81,6 @@ GenomeSpec default_genome(const Config& cfg) {
             set(G_SEC(k, 1, i), nm, llo[i], lhi[i]);
         }
     }
-    // Bezier extension genes — appended only when toggles active.
-    // ponytail: push_back so fixed indices G_* and G_SEC() are never disturbed.
-    auto push = [&](const char* nm, double lo_v, double hi_v) {
-        g.names.push_back(nm);
-        g.lo.push_back(lo_v);
-        g.hi.push_back(hi_v);
-    };
-    if (cfg.geti("bezier_te", 0)) {
-        // P1..P4 of a degree-5 TE chord-offset Bezier; P0=P5=0 (endpoints fixed).
-        // Positive offset → TE moved aft (wider chord); negative → TE pulled forward.
-        // ±8 cm gives enough room to curve inboard TE clear of prop disk.
-        push("te_bz1", -0.08, 0.08);
-        push("te_bz2", -0.08, 0.08);
-        push("te_bz3", -0.08, 0.08);
-        push("te_bz4", -0.08, 0.08);
-    }
-    if (cfg.geti("bezier_fold", 0)) {
-        // P1..P3 of a degree-4 fold Bezier; P0=0 (fold start), P4=1 (full cant).
-        // Values in [0,1] normal; >1 allows overshoot (S-curve cant ramp).
-        push("fold_bz1", 0.0, 1.5);
-        push("fold_bz2", 0.0, 1.5);
-        push("fold_bz3", 0.0, 1.5);
-    }
     return g;
 }
 
@@ -80,6 +89,30 @@ double bernstein(int i, int n, double x) {
     double c = 1.0;
     for (int k = 0; k < i; ++k) c = c * (n - k) / (k + 1);
     return c * std::pow(x, i) * std::pow(1.0 - x, n - i);
+}
+
+namespace {
+// Generic Bezier evaluator over an arbitrary control-point vector.
+double bezier_eval(const std::vector<double>& cp, double t) {
+    int n = static_cast<int>(cp.size()) - 1;
+    if (n < 0) return 0.0;
+    double s = 0.0;
+    for (int i = 0; i <= n; ++i) s += cp[i] * bernstein(i, n, t);
+    return s;
+}
+}  // namespace
+
+double chord_at(const WingGeometry& w, double eta) {
+    return bezier_eval(w.chord_cp, eta);
+}
+double xle_at(const WingGeometry& w, double eta) {
+    return w.semi_span * bezier_eval(w.sweep_cp, eta);
+}
+double twist_at(const WingGeometry& w, double eta) {
+    return bezier_eval(w.twist_cp, eta);
+}
+double dihedral_at(const WingGeometry& w, double eta) {
+    return bezier_eval(w.dih_cp, eta);
 }
 
 static double class_fn(const Airfoil& f, double x) {
@@ -176,7 +209,30 @@ ThinAirfoil thin_airfoil(const Airfoil& f) {
     return t;
 }
 
+namespace {
+std::vector<double> linear_cp(int n, double v0, double v1) {
+    std::vector<double> cp(n);
+    for (int i = 0; i < n; ++i)
+        cp[i] = v0 + (v1 - v0) * (n > 1 ? double(i) / (n - 1) : 0.0);
+    return cp;
+}
+}  // namespace
+
+void set_linear_planform(WingGeometry& w, double root_chord, double tip_chord,
+                         double le_sweep_rad, double washout_rad) {
+    w.chord_cp = linear_cp(NCP_CHORD, root_chord, tip_chord);
+    double sweep_tip_frac = std::tan(le_sweep_rad);
+    w.sweep_cp = linear_cp(NCP_SWEEP, 0.0, sweep_tip_frac);
+    w.twist_cp = linear_cp(NCP_TWIST, 0.0, washout_rad);
+    if (w.dih_cp.empty()) w.dih_cp.assign(NCP_DIH, 0.0);
+    w.root_chord = root_chord;
+    w.tip_chord  = tip_chord;
+    w.le_sweep   = le_sweep_rad;
+    w.washout    = washout_rad;
+}
+
 WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec, const Config& cfg) {
+    (void)cfg;  // no toggles left; genes fully determine the wing
     auto clamp = [&](int i) {
         double v = g[i];
         if (v < spec.lo[i]) v = spec.lo[i];
@@ -184,23 +240,36 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec, const 
         return v;
     };
     WingGeometry w;
-    w.root_chord    = clamp(G_ROOT);
-    w.tip_chord     = w.root_chord * clamp(G_TAPER);
-    w.semi_span     = clamp(G_SEMISPAN);
-    w.le_sweep      = clamp(G_SWEEP) * DEG2RAD;
-    w.washout       = clamp(G_WASHOUT) * DEG2RAD;
+    w.semi_span = clamp(G_SEMISPAN);
+
+    w.chord_cp.resize(NCP_CHORD);
+    for (int i = 0; i < NCP_CHORD; ++i) w.chord_cp[i] = clamp(G_CHORD_CP + i);
+
+    w.sweep_cp.resize(NCP_SWEEP);
+    w.sweep_cp[0] = 0.0;   // root LE pinned at x_le=0
+    for (int i = 1; i < NCP_SWEEP; ++i) w.sweep_cp[i] = clamp(G_SWEEP_CP + (i - 1));
+
+    w.twist_cp.resize(NCP_TWIST);
+    for (int i = 0; i < NCP_TWIST; ++i) w.twist_cp[i] = clamp(G_TWIST_CP + i) * DEG2RAD;
+
+    w.dih_cp.resize(NCP_DIH);
+    w.dih_cp[0] = 0.0;   // root dihedral pinned flat
+    for (int i = 1; i < NCP_DIH; ++i) w.dih_cp[i] = clamp(G_DIH_CP + (i - 1)) * DEG2RAD;
+
     w.battery_x     = clamp(G_BATTERY);
     // ponytail: box-fit clamp moved to massprops::compute() where battery_len_m is available
     w.mode          = ControlMode::Elevon;  // G_MODE dropped; always elevon
     w.cs_chord_frac = clamp(G_CS_CHORD);
     w.ail_span_frac = clamp(G_AIL_SPAN);
-    w.chord_exp     = clamp(G_CHORD_EXP);
-    w.sweep_exp     = clamp(G_SWEEP_EXP);
-    w.gull_a        = clamp(G_GULL_A);
-    w.gull_b        = clamp(G_GULL_B);
-    w.gull_c        = clamp(G_GULL_C);
-    w.winglet_cant  = clamp(G_WINGLET_CANT) * DEG2RAD;
-    w.winglet_eta   = clamp(G_WINGLET_ETA);
+
+    // Derived summaries for analytical downstream models (single source of
+    // truth: computed from the same curves loft() will sample).
+    w.root_chord = chord_at(w, 0.0);
+    w.tip_chord  = chord_at(w, 1.0);
+    w.le_sweep   = std::atan2(xle_at(w, 1.0), w.semi_span > 0.0 ? w.semi_span : 1.0);
+    w.washout    = twist_at(w, 1.0) - twist_at(w, 0.0);
+    // z_tip / nonplanar_h need the arc-integrated station z; loft() fills them.
+
     w.sections.resize(N_SECTIONS);
     for (int k = 0; k < N_SECTIONS; ++k) {
         w.sections[k].wu = {clamp(G_SEC(k,0,0)), clamp(G_SEC(k,0,1)),
@@ -208,29 +277,6 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec, const 
         w.sections[k].wl = {clamp(G_SEC(k,1,0)), clamp(G_SEC(k,1,1)),
                             clamp(G_SEC(k,1,2)), clamp(G_SEC(k,1,3))};
         w.sections[k].te_thick = 0.0;  // sharp TE everywhere; motor pocket via CAD split-plane
-    }
-    // Decode bezier extension genes when toggles active
-    w.bezier_te_on   = cfg.geti("bezier_te",   0) != 0;
-    w.bezier_fold_on = cfg.geti("bezier_fold",  0) != 0;
-    int bidx = N_GENES;
-    if (w.bezier_te_on && (int)g.size() >= bidx + N_BEZ_TE) {
-        w.te_ctrl.resize(N_BEZ_TE);
-        for (int i = 0; i < N_BEZ_TE; ++i) {
-            double v = g[bidx + i];
-            if (v < spec.lo[bidx+i]) v = spec.lo[bidx+i];
-            if (v > spec.hi[bidx+i]) v = spec.hi[bidx+i];
-            w.te_ctrl[i] = v;
-        }
-        bidx += N_BEZ_TE;
-    }
-    if (w.bezier_fold_on && (int)g.size() >= bidx + N_BEZ_FOLD) {
-        w.fold_ctrl.resize(N_BEZ_FOLD);
-        for (int i = 0; i < N_BEZ_FOLD; ++i) {
-            double v = g[bidx + i];
-            if (v < spec.lo[bidx+i]) v = spec.lo[bidx+i];
-            if (v > spec.hi[bidx+i]) v = spec.hi[bidx+i];
-            w.fold_ctrl[i] = v;
-        }
     }
     return w;
 }
@@ -241,64 +287,42 @@ void loft(WingGeometry& w, int n) {
     if (w.sections.empty()) w.sections.resize(1);
     const int K = (int)w.sections.size();
     // η breakpoints: canonical 5-section table when K==5; linear spacing otherwise.
+    // (CST loft breakpoints only — independent of the smooth planform curves.)
     std::vector<double> ETA(K);
     if (K == N_SECTIONS) {
         for (int k = 0; k < K; ++k) ETA[k] = SECTION_ETA[k];
     } else {
         for (int k = 0; k < K; ++k) ETA[k] = (K > 1) ? double(k) / (K - 1) : 0.0;
     }
-    const double b      = w.semi_span;
-    const double eta_wl = w.winglet_eta;
-    const double cant   = w.winglet_cant;
-    const double blend  = std::max(1e-9, std::min(w.winglet_blend, 1.0 - eta_wl));
+    const double b = w.semi_span;
     // Cosine-spaced flat arc coords
     std::vector<double> y(n);
     for (int i = 0; i < n; ++i) {
         double th = PI * i / (n - 1);
         y[i] = b * 0.5 * (1.0 - std::cos(th));
     }
-    // Pass 1: physical (yp, z_arr) and local dihedral angle via angle integration.
-    // ponytail: bezier_te adds chord offsets; bezier_fold replaces smoothstep cant ramp.
-    // Reuse existing bernstein(); endpoints pinned so power-law is the fallback at t=0,1.
-    auto te_bez_offset = [&](double t) -> double {
-        if (!w.bezier_te_on || (int)w.te_ctrl.size() < N_BEZ_TE) return 0.0;
-        // degree-5 Bezier: P0=0, P1..P4=genes, P5=0
-        double p[6] = {0.0, w.te_ctrl[0], w.te_ctrl[1], w.te_ctrl[2], w.te_ctrl[3], 0.0};
-        double r = 0.0;
-        for (int i = 0; i < 6; ++i) r += p[i] * bernstein(i, 5, t);
-        return r;
-    };
-    auto fold_bez = [&](double uc) -> double {
-        // uc in [0,1]: normalised position within winglet blend zone
-        if (!w.bezier_fold_on || (int)w.fold_ctrl.size() < N_BEZ_FOLD) {
-            return uc * uc * (3.0 - 2.0 * uc);  // ponytail: smoothstep fallback
-        }
-        // degree-4 Bezier: P0=0, P1..P3=genes, P4=1
-        double p[5] = {0.0, w.fold_ctrl[0], w.fold_ctrl[1], w.fold_ctrl[2], 1.0};
-        double r = 0.0;
-        for (int i = 0; i < 5; ++i) r += p[i] * bernstein(i, 4, uc);
-        return r;
-    };
-    auto get_phi = [&](double t) {
-        double phi_gull = std::atan(w.gull_a + 2.0 * w.gull_b * t + 3.0 * w.gull_c * t * t);
-        double u = (t - eta_wl) / blend;
-        double uc = std::max(0.0, std::min(1.0, u));
-        return phi_gull + cant * fold_bez(uc);
-    };
+    // Pass 1: physical (yp, z_arr) and local dihedral angle via arc integration
+    // of the smooth dihedral-angle Bezier curve. Continuous angle -> no crease;
+    // a smoothly rising angle near the tip is an organic raised tip.
     std::vector<double> yp(n), z_arr(n), phi_arr(n);
     yp[0] = 0.0;
     z_arr[0] = 0.0;
-    phi_arr[0] = get_phi(0.0);
+    phi_arr[0] = dihedral_at(w, 0.0);
     for (int i = 1; i < n; ++i) {
         double d_arc = y[i] - y[i-1];
         double t_prev = (b > 0.0) ? y[i-1] / b : 0.0;
         double t = (b > 0.0) ? y[i] / b : 0.0;
         double t_mid = 0.5 * (t_prev + t);
-        double phi_mid = get_phi(t_mid);
+        double phi_mid = dihedral_at(w, t_mid);
         yp[i] = yp[i-1] + d_arc * std::cos(phi_mid);
         z_arr[i] = z_arr[i-1] + d_arc * std::sin(phi_mid);
-        phi_arr[i] = get_phi(t);
+        phi_arr[i] = dihedral_at(w, t);
     }
+    double max_abs_z = 0.0;
+    for (int i = 0; i < n; ++i) max_abs_z = std::max(max_abs_z, std::fabs(z_arr[i]));
+    w.nonplanar_h = max_abs_z;
+    w.z_tip = (b > 0.0) ? z_arr[n - 1] / b : 0.0;
+
     for (int i = 0; i < n; ++i) {
         double t = (b > 0) ? y[i] / b : 0.0;
         Station s;
@@ -306,23 +330,12 @@ void loft(WingGeometry& w, int n) {
         s.z        = z_arr[i];
         s.dihedral = phi_arr[i];
         s.eta      = t;
-        // Power-law taper: chord(t) = root - (root-tip)*t^exp  (exp=1 → linear)
-        double te = std::pow(t, w.chord_exp);
-        double chord_base = w.root_chord - (w.root_chord - w.tip_chord) * te;
-        s.chord = std::max(0.005, chord_base + te_bez_offset(t));
-        // Power-law (crescent) sweep: x_le(t) = semi_span*tan(sweep)*t^exp
-        double se = std::pow(t, w.sweep_exp);
-        s.x_le  = b * std::tan(w.le_sweep) * se;
-        s.twist = w.washout * t;
-        if (cant >= 1e-6 && t > eta_wl) {
-            s.in_winglet = true;
-            // taper winglet chord toward tip (winglet_taper=1 → no change)
-            if (w.winglet_taper != 1.0) {
-                double frac = (t - eta_wl) / (1.0 - eta_wl);
-                s.chord *= 1.0 + (w.winglet_taper - 1.0) * frac;
-            }
-        }
-        // piecewise linear blend between K control sections
+        s.chord    = std::max(0.005, chord_at(w, t));   // safety floor only
+        s.x_le     = xle_at(w, t);
+        s.twist    = twist_at(w, t);
+        s.in_winglet = (phi_arr[i] * RAD2DEG) > WINGLET_DIH_THRESHOLD_DEG;
+
+        // piecewise linear blend between K control sections (CST airfoils only)
         int seg = K - 2;
         for (int k = 0; k < K - 1; ++k)
             if (ETA[k + 1] >= t) { seg = k; break; }

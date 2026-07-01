@@ -5,6 +5,7 @@
 #include <cmath>
 #include <array>
 #include <vector>
+#include <algorithm>
 
 namespace aero {
 namespace avl {
@@ -59,21 +60,17 @@ bool write_case(const std::string& stem, const WingGeometry& w,
     o << "TRANSLATE\n0.0 0.0 0.0\n";
     o << "ANGLE\n0.0\n#\n";
 
-    // K SECTION entries using canonical η breakpoints; power-law + gull + winglet fold.
-    const double b_h     = w.semi_span;
-    const double eta_wl  = w.winglet_eta;
-    const double cant    = w.winglet_cant;
+    // K SECTION entries using canonical η breakpoints; geometry read through the
+    // shared smooth-curve evaluators (single source of truth with geom::loft()).
     for (int k = 0; k < K && k < 5; ++k) {
-        double eta = geom::SECTION_ETA[k];
-        double se  = std::pow(eta, w.sweep_exp);
-        double te  = std::pow(eta, w.chord_exp);
-        double xle   = b_h * std::tan(w.le_sweep) * se;
-        double chord = w.root_chord - (w.root_chord - w.tip_chord) * te;
-        double twist = w.washout * eta * RAD2DEG;
+        double eta   = geom::SECTION_ETA[k];
+        double xle   = geom::xle_at(w, eta);
+        double chord = geom::chord_at(w, eta);
+        double twist = geom::twist_at(w, eta) * RAD2DEG;
         double phys_y = 0.0;
         double phys_z = 0.0;
         if (w.stations.empty()) {
-            phys_y = eta * b_h;
+            phys_y = eta * w.semi_span;
             phys_z = 0.0;
         } else if (eta <= w.stations.front().eta) {
             phys_y = w.stations.front().y;
@@ -101,13 +98,32 @@ bool write_case(const std::string& stem, const WingGeometry& w,
     return true;
 }
 
-bool write_3d_csv(const std::string& stem, const WingGeometry& w) {
+// Root motor boss: the sharp-TE OML is locally opened near the root TE so the
+// export shows the real blunt pocket (motor housing, CAD plane-split) instead
+// of a knife edge, tapering smoothly back to sharp by motor_boss_span_frac.
+// half_open(y, x) returns extra half-thickness (chord-fraction) to floor onto,
+// zero outside the boss region.
+static double te_boss_half_open(double y, double x, double semi_span,
+                                 double chord, double boss_dia, double span_frac) {
+    if (boss_dia <= 0.0 || span_frac <= 0.0 || chord <= 0.0) return 0.0;
+    double span_span = span_frac * (semi_span > 0.0 ? semi_span : 1.0);
+    double span_decay = 1.0 - std::fabs(y) / span_span;
+    if (span_decay <= 0.0) return 0.0;
+    // smoothstep the last 15% of chord: 0 at x=0.85, 1 at x=1 (TE)
+    double x_decay = std::clamp((x - 0.85) / 0.15, 0.0, 1.0);
+    x_decay = x_decay * x_decay * (3.0 - 2.0 * x_decay);
+    return (0.5 * boss_dia / chord) * span_decay * x_decay;
+}
+
+bool write_3d_csv(const std::string& stem, const WingGeometry& w, const Config& cfg) {
     if (w.stations.empty()) return false;
     std::ofstream csv(stem + "_3d.csv");
     if (!csv) return false;
     csv << "Station_ID,Side,X,Y,Z\n";
     csv << std::fixed << std::setprecision(6);
     const int N = 80;
+    double boss_dia  = cfg.getd("motor_boss_diameter", 0.030);
+    double boss_frac = cfg.getd("motor_boss_span_frac", 0.06);
     for (int si = 0; si < (int)w.stations.size(); ++si) {
         const Station& s = w.stations[si];
         double rad  = -s.twist;
@@ -122,7 +138,8 @@ bool write_3d_csv(const std::string& stem, const WingGeometry& w) {
                 double th = PI * i / N;
                 double x  = 0.5 * (1.0 - std::cos(th));
                 double xc = x * s.chord;
-                double zc = geom::cst_upper(s.af, x) * s.chord;
+                double open = te_boss_half_open(s.y, x, w.semi_span, s.chord, boss_dia, boss_frac);
+                double zc = std::max(geom::cst_upper(s.af, x), open) * s.chord;
                 double zr = xc * sinT + zc * cosT;
                 double Y  = y_sign * (s.y - zr * std::sin(s.dihedral));
                 double Z  = s.z + zr * std::cos(s.dihedral);
@@ -136,7 +153,8 @@ bool write_3d_csv(const std::string& stem, const WingGeometry& w) {
                 double th = PI * i / N;
                 double x  = 0.5 * (1.0 - std::cos(th));
                 double xc = x * s.chord;
-                double zc = geom::cst_lower(s.af, x) * s.chord;
+                double open = te_boss_half_open(s.y, x, w.semi_span, s.chord, boss_dia, boss_frac);
+                double zc = std::min(geom::cst_lower(s.af, x), -open) * s.chord;
                 double zr = xc * sinT + zc * cosT;
                 double Y  = y_sign * (s.y - zr * std::sin(s.dihedral));
                 double Z  = s.z + zr * std::cos(s.dihedral);

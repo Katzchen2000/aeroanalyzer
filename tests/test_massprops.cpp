@@ -6,8 +6,8 @@ using namespace aero;
 
 static WingGeometry rect_wing() {
     WingGeometry w;
-    w.root_chord = 0.20; w.tip_chord = 0.20; w.semi_span = 0.60;
-    w.le_sweep = 0.0; w.washout = 0.0;
+    w.semi_span = 0.60;
+    geom::set_linear_planform(w, 0.20, 0.20, 0.0, 0.0);
     Airfoil af; af.wu = {0.18, 0.15, 0.12, 0.10};
     af.wl = {-0.18, -0.15, -0.12, -0.10};
     af.te_thick = 0.0;
@@ -61,8 +61,8 @@ TEST(battery_shift_moves_cg) {
 TEST(prop_clearance_fires_on_aft_te) {
     WingGeometry w;
     // Very long root chord so TE = root_chord = 0.50 m >> prop face at 0.203/2+0.01=~0.22 m
-    w.root_chord = 0.50; w.tip_chord = 0.10; w.semi_span = 0.60;
-    w.le_sweep = 0.0; w.washout = 0.0;
+    w.semi_span = 0.60;
+    geom::set_linear_planform(w, 0.50, 0.10, 0.0, 0.0);
     Airfoil af; af.wu = {0.18,0.15,0.12,0.10}; af.wl = {-0.12,-0.10,-0.08,-0.05};
     af.te_thick = 0.0;
     w.sections.assign(1, af);
@@ -76,8 +76,8 @@ TEST(prop_clearance_fires_on_aft_te) {
     // Use a more extreme case: zero sweep, root_chord=0.50, prop face = 0.505 → barely clear
     // Make root_chord > face to breach: set root_chord=0.60 via re-loft
     WingGeometry w2;
-    w2.root_chord = 0.60; w2.tip_chord = 0.10; w2.semi_span = 0.60;
-    w2.le_sweep = 0.0; w2.washout = 0.0;
+    w2.semi_span = 0.60;
+    geom::set_linear_planform(w2, 0.60, 0.10, 0.0, 0.0);
     w2.sections.assign(1, af);
     geom::loft(w2, 20);
     MassProps mp2 = massprops::compute(w2, cfg);

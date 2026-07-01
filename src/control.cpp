@@ -198,9 +198,9 @@ LateralDerivs lateral_derivs(const WingGeometry& w, const MassProps& mp,
 
     // Cl_beta: roll-due-to-sideslip (dihedral + sweep contributions).
     // Dihedral term: use mean effective dihedral = atan(z_tip / semi_span).
-    // z_tip = gull_a + gull_b + gull_c (evaluating the cubic at eta=1).
-    double z_tip = w.gull_a + w.gull_b + w.gull_c;
-    double eff_dihedral = (w.semi_span > 0) ? std::atan2(z_tip, w.semi_span) : 0.0;
+    // w.z_tip is already dimensionless (z(tip)/semi_span) from the arc-
+    // integrated smooth dihedral curve.
+    double eff_dihedral = (w.semi_span > 0.0) ? std::atan(w.z_tip) : 0.0;
     double cl_beta_dihedral = -eff_dihedral * CL * AR / (2.0 * (AR + 4.0));
     // Sweep term: Perkins & Hage swept-wing approximation.
     double cl_beta_sweep    = -CL * AR * std::tan(w.le_sweep) / (4.0 * (AR + 4.0));

@@ -46,37 +46,36 @@ struct Station {
     double width    = 0.0;   // spanwise strip width for integration, m
     double dihedral = 0.0;   // local section normal tilt, rad (0=flat, π/2=vertical)
     double eta      = 0.0;   // normalised span parameter t=y_flat/semi_span
-    bool in_winglet = false;  // true for fold stations beyond winglet_eta
+    bool in_winglet = false;  // true where local dihedral angle exceeds the
+                              // steep-dihedral threshold (config); relaxed chord floor
     Airfoil af;            // lofted section shape at this station (root->tip blend)
 };
 
 // Decoded design: a physical half-wing (mirror assumed).
+// Every spanwise distribution is a smooth Bezier curve over eta in [0,1] —
+// organic, no faceting. geom::chord_at/xle_at/twist_at/dihedral_at (geom.h)
+// are the single source of truth; every consumer reads through them (never
+// re-derive chord/x_le/twist/dihedral from these control-point vectors directly).
 struct WingGeometry {
-    double semi_span  = 0.6;   // m (half span, tip at +semi_span)
-    double root_chord = 0.25;  // m
-    double tip_chord  = 0.13;  // m
-    double le_sweep   = 0.0;   // rad (leading-edge sweep)
-    double washout    = 0.0;   // rad (tip twist, negative = washout)
-    double chord_exp  = 1.0;   // taper power-law exponent (1 = linear)
-    double sweep_exp  = 1.0;   // LE sweep power-law exponent (1 = linear crescent)
-    double gull_a     = 0.0;   // gull dihedral: z(η)=b*(a·η+b·η²+c·η³), dimensionless
-    double gull_b     = 0.0;   // gull quadratic coeff, dimensionless
-    double gull_c     = 0.0;   // gull cubic coeff, dimensionless
-    double winglet_cant   = 0.0;  // winglet fold cant angle, rad (0=flat, π/2=vertical)
-    double winglet_eta    = 0.85; // winglet fold start, fraction of semi_span [0.75,0.95]
-    double winglet_taper  = 1.0;  // chord scale at winglet tip (1=untapered, 0.5=half chord)
-    double winglet_blend  = 0.06; // smoothstep band width for fold, fraction of span
+    double semi_span  = 0.6;   // m (half span, tip at +semi_span) — gene
+    std::vector<double> chord_cp;   // NCP_CHORD Bezier pts, m (CP0 = root chord)
+    std::vector<double> sweep_cp;   // NCP_SWEEP Bezier pts of x_le/semi_span (CP0 = 0)
+    std::vector<double> twist_cp;   // NCP_TWIST Bezier pts, rad
+    std::vector<double> dih_cp;     // NCP_DIH Bezier pts of dihedral angle, rad (CP0 = 0)
+    // derived summaries (set by geom::decode/loft) — for analytical downstream
+    // models that want one representative scalar rather than the full curve.
+    double root_chord  = 0.25;  // m, = chord_at(0)
+    double tip_chord   = 0.13;  // m, = chord_at(1)
+    double le_sweep    = 0.0;   // rad, net representative sweep = atan2(xle_at(1), semi_span)
+    double washout     = 0.0;   // rad, = twist_at(1) - twist_at(0)
+    double z_tip       = 0.0;   // dimensionless, = z(tip)/semi_span
+    double nonplanar_h = 0.0;   // m, max|z| over stations (non-planar CDi driver)
     std::vector<Airfoil> sections;  // K control sections; loft() blends piecewise
     ControlMode mode = ControlMode::Elevon;  // ponytail: fixed; G_MODE gene dropped
     double battery_x     = 0.05;  // battery-box CG x location, m (CG trim handle)
     double cs_chord_frac = 0.25;  // control-surface chord fraction [0.15, 0.35]
     double ail_span_frac = 0.60;  // aileron inboard edge, fraction of semi-span [0.40, 0.80]
     std::vector<Station> stations;  // filled by geom::loft()
-    // Bezier planform / fold extensions (populated by decode when toggles active)
-    bool bezier_te_on   = false;  // TE offset Bezier active
-    bool bezier_fold_on = false;  // winglet fold Bezier active
-    std::vector<double> te_ctrl;    // 4 interior TE chord-offset ctrl pts (P1..P4, degree-5)
-    std::vector<double> fold_ctrl;  // 3 interior fold cant ctrl pts (P1..P3, degree-4)
 };
 
 // ---- mass properties ----------------------------------------------------

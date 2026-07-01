@@ -56,12 +56,11 @@ TEST(reflex_changes_cm) {
     CHECK(std::fabs(cmb - cma) > 1e-3);
 }
 
-// Rectangular planform: known area / aspect ratio.
+// Rectangular planform via set_linear_planform: known area / aspect ratio.
 TEST(planform_rectangular) {
-    // build directly to control taper=1, sweep=0
     WingGeometry w;
-    w.root_chord = 0.20; w.tip_chord = 0.20; w.semi_span = 0.60;
-    w.le_sweep = 0.0; w.washout = 0.0;
+    w.semi_span = 0.60;
+    geom::set_linear_planform(w, 0.20, 0.20, 0.0, 0.0);
     w.sections.resize(1);   // single uniform section, loft handles it
     geom::loft(w, 20);
     double S, mac, xle, b, AR;
@@ -75,8 +74,8 @@ TEST(planform_rectangular) {
 // Lofting respects cosine spacing endpoints and monotonic span.
 TEST(loft_spanwise) {
     WingGeometry w;
-    w.root_chord = 0.25; w.tip_chord = 0.12; w.semi_span = 0.6;
-    w.le_sweep = 20.0 * DEG2RAD; w.washout = -4.0 * DEG2RAD;
+    w.semi_span = 0.6;
+    geom::set_linear_planform(w, 0.25, 0.12, 20.0 * DEG2RAD, -4.0 * DEG2RAD);
     w.sections.resize(1);
     geom::loft(w, 20);
     CHECK_NEAR(w.stations.front().y, 0.0, 1e-9);
@@ -85,27 +84,24 @@ TEST(loft_spanwise) {
     CHECK(w.stations.back().x_le > w.stations.front().x_le);  // swept aft
 }
 
-// 5-section genome: N_GENES == 55, G_SEC addressing correct.
-TEST(genome_5_sections) {
-    CHECK(geom::N_GENES == 55);
+// New genome layout: N_GENES == 67, G_SEC addressing correct.
+TEST(genome_layout_67_genes) {
+    CHECK(geom::N_GENES == 67);
     geom::GenomeSpec spec = geom::default_genome();
-    CHECK((int)spec.size() == 55);
+    CHECK((int)spec.size() == 67);
     // all sections share the same CST bounds
     for (int k = 1; k < geom::N_SECTIONS; ++k) {
         CHECK_NEAR(spec.lo[geom::G_SEC(k,0,0)], spec.lo[geom::G_SEC(0,0,0)], 1e-12);
         CHECK_NEAR(spec.hi[geom::G_SEC(k,1,3)], spec.hi[geom::G_SEC(0,1,3)], 1e-12);
     }
-    // G_CHORD_EXP / G_SWEEP_EXP lower bound is 1.0 (linear is the minimum)
-    CHECK_NEAR(spec.lo[geom::G_CHORD_EXP], 1.0, 1e-12);
-    CHECK_NEAR(spec.lo[geom::G_SWEEP_EXP], 1.0, 1e-12);
 }
 
-// loft() piecewise blend: knot points reproduce control sections exactly;
-// inner segment blends correctly.
+// loft() piecewise CST blend: knot points reproduce control sections exactly;
+// inner segment blends correctly. Unchanged behavior from the old 5-section loft.
 TEST(loft_5section_blend) {
     WingGeometry w;
-    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.chord_exp = 1.0; w.sweep_exp = 1.0;  // linear (default)
+    w.semi_span = 0.6;
+    geom::set_linear_planform(w, 0.25, 0.13, 0.0, 0.0);
     // 5 control sections with distinct wu[0] values
     w.sections.resize(5);
     for (int k = 0; k < 5; ++k) {
@@ -137,49 +133,6 @@ TEST(loft_5section_blend) {
         CHECK_NEAR(w.stations[idx].af.wu[j], w.sections[2].wu[j], 1e-9);
 }
 
-// Power-law taper: chord_exp=1 reproduces linear; exp>1 curves inboard.
-TEST(loft_power_law_taper) {
-    WingGeometry w;
-    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.le_sweep = 0.0; w.washout = 0.0;
-    w.chord_exp = 1.0; w.sweep_exp = 1.0;
-    w.sections.resize(1);
-    geom::loft(w, 41);
-    // midspan nearest η=0.5
-    int mid = 0; double best = 1e9;
-    for (int i = 0; i < (int)w.stations.size(); ++i) {
-        double d = std::fabs(w.stations[i].y - 0.5 * w.semi_span);
-        if (d < best) { best = d; mid = i; }
-    }
-    double chord_lin = w.root_chord - (w.root_chord - w.tip_chord) * 0.5;
-    CHECK_NEAR(w.stations[mid].chord, chord_lin, 1e-3);
-
-    // exp=2: tip half is narrowed (curved inboard taper)
-    w.chord_exp = 2.0;
-    geom::loft(w, 41);
-    mid = 0; best = 1e9;
-    for (int i = 0; i < (int)w.stations.size(); ++i) {
-        double d = std::fabs(w.stations[i].y - 0.5 * w.semi_span);
-        if (d < best) { best = d; mid = i; }
-    }
-    double chord_exp2 = w.root_chord - (w.root_chord - w.tip_chord) * 0.25; // t^2 at η=0.5
-    CHECK_NEAR(w.stations[mid].chord, chord_exp2, 1e-3);
-}
-
-// Gull dihedral: coeffs are dimensionless; z(η)=semi_span*(a*η+b*η²+c*η³).
-TEST(loft_gull_dihedral) {
-    WingGeometry w;
-    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.chord_exp = 1.0; w.sweep_exp = 1.0; w.le_sweep = 0.0; w.washout = 0.0;
-    w.gull_a = 0.05; w.gull_b = -0.03; w.gull_c = 0.01;
-    w.sections.resize(1);
-    geom::loft(w, 20);
-    // coefficients dimensionless; multiply by semi_span to get metres
-    double z_tip_expected = w.semi_span * (w.gull_a + w.gull_b + w.gull_c);
-    CHECK_NEAR(w.stations.back().z, z_tip_expected, 1e-3);
-    CHECK_NEAR(w.stations.front().z, 0.0, 1e-9);  // root at z=0
-}
-
 // decode() forces all section te_thick = 0 (sharp TE everywhere).
 TEST(decode_sharp_te) {
     geom::GenomeSpec spec = geom::default_genome();
@@ -196,30 +149,118 @@ TEST(decode_sharp_te) {
     }
 }
 
-// Winglet fold: at 80 deg cant, outer-station z increment >> y increment.
-TEST(loft_winglet_fold) {
-    WingGeometry w;
-    w.root_chord = 0.25; w.tip_chord = 0.13; w.semi_span = 0.6;
-    w.chord_exp = 1.0; w.sweep_exp = 1.0; w.le_sweep = 0.0; w.washout = 0.0;
-    w.winglet_eta  = 0.80;
-    w.winglet_cant = 80.0 * DEG2RAD;
-    w.sections.resize(1);
-    geom::loft(w, 100);
-    // Find the station just inboard of fold and the tip
-    const Station& tip  = w.stations.back();
-    const Station& root = w.stations.front();
-    // Tip physical y should be << semi_span (cant compresses horizontal span)
-    CHECK(tip.y < 0.95 * w.semi_span);          // fold pulled it in
-    // Tip z should be substantially above root z (fold went up)
-    CHECK(tip.z > 0.05 * w.semi_span);           // at least 5% span height
-    // Root stays at z=0
-    CHECK_NEAR(root.z, 0.0, 1e-9);
+// ---- new organic-Bezier evaluator tests ---------------------------------
 
-    // Kink check: per-station dihedral must have no jump across eta_wl
-    double max_diff = 0.0;
-    for (size_t i = 1; i < w.stations.size(); ++i) {
-        double diff = std::fabs(w.stations[i].dihedral - w.stations[i-1].dihedral);
-        if (diff > max_diff) max_diff = diff;
+// Endpoint exactness: Bezier curves interpolate their first/last control point.
+TEST(bezier_endpoint_exactness) {
+    WingGeometry w;
+    w.semi_span = 0.6;
+    w.chord_cp = {0.28, 0.24, 0.22, 0.18, 0.15, 0.11};
+    w.sweep_cp = {0.0, 0.10, 0.20, 0.30, 0.40, 0.55};
+    w.twist_cp = {1.0*DEG2RAD, 0.5*DEG2RAD, -0.5*DEG2RAD, -2.0*DEG2RAD, -3.5*DEG2RAD, -5.0*DEG2RAD};
+    w.dih_cp   = {0.0, 2.0*DEG2RAD, 5.0*DEG2RAD, 10.0*DEG2RAD, 20.0*DEG2RAD, 35.0*DEG2RAD, 50.0*DEG2RAD};
+
+    CHECK_NEAR(geom::chord_at(w, 0.0), w.chord_cp.front(), 1e-12);
+    CHECK_NEAR(geom::chord_at(w, 1.0), w.chord_cp.back(), 1e-12);
+    CHECK_NEAR(geom::twist_at(w, 0.0), w.twist_cp.front(), 1e-12);
+    CHECK_NEAR(geom::twist_at(w, 1.0), w.twist_cp.back(), 1e-12);
+    CHECK_NEAR(geom::xle_at(w, 0.0), 0.0, 1e-12);
+    CHECK_NEAR(geom::xle_at(w, 1.0), w.semi_span * w.sweep_cp.back(), 1e-9);
+    CHECK_NEAR(geom::dihedral_at(w, 0.0), 0.0, 1e-12);
+    CHECK_NEAR(geom::dihedral_at(w, 1.0), w.dih_cp.back(), 1e-12);
+}
+
+// Smoothness / no crease: a rising dihedral curve near the tip must be C1 —
+// finite-difference slope has no jump anywhere, unlike the old winglet fold.
+TEST(dihedral_curve_no_crease) {
+    WingGeometry w;
+    w.semi_span = 0.6;
+    geom::set_linear_planform(w, 0.25, 0.13, 0.0, 0.0);
+    w.dih_cp = {0.0, 0.0, 2.0*DEG2RAD, 8.0*DEG2RAD, 20.0*DEG2RAD, 40.0*DEG2RAD, 60.0*DEG2RAD};
+
+    const int N = 400;
+    const double h = 1.0 / N;
+    double max_slope_jump = 0.0;
+    double prev_slope = 0.0;
+    for (int i = 1; i <= N; ++i) {
+        double eta = i * h;
+        double slope = (geom::dihedral_at(w, eta) - geom::dihedral_at(w, eta - h)) / h;
+        if (i > 1) {
+            double jump = std::fabs(slope - prev_slope);
+            if (jump > max_slope_jump) max_slope_jump = jump;
+        }
+        prev_slope = slope;
     }
-    CHECK(max_diff < w.winglet_cant / 3.0);
+    // A hard crease (like the old winglet fold) produces a slope jump of tens of
+    // rad/unit-eta at the fold station; a smooth Bezier stays tiny between samples.
+    CHECK(max_slope_jump < 1.0);
+}
+
+// Chord positivity: convex-hull guarantee — all-positive control points keep
+// chord_at(eta) > 0 across the whole span, even for an aggressive random curve.
+TEST(chord_positivity_convex_hull) {
+    WingGeometry w;
+    w.semi_span = 0.6;
+    w.chord_cp = {0.30, 0.05, 0.28, 0.04, 0.20, 0.06};  // wild but all > 0
+    for (int i = 0; i <= 50; ++i) {
+        double eta = i / 50.0;
+        CHECK(geom::chord_at(w, eta) > 0.0);
+    }
+}
+
+// Twist non-linearity: a curved twist_cp set must NOT reduce to a straight
+// line between root and tip (guards against silently falling back to the
+// old purely-linear washout model).
+TEST(twist_curve_is_nonlinear) {
+    WingGeometry w;
+    w.semi_span = 0.6;
+    w.twist_cp = {0.0, 15.0*DEG2RAD, -20.0*DEG2RAD, 5.0*DEG2RAD, -15.0*DEG2RAD, -5.0*DEG2RAD};
+    double t0 = geom::twist_at(w, 0.0);
+    double t1 = geom::twist_at(w, 1.0);
+    double mid_linear = 0.5 * (t0 + t1);
+    double mid_actual = geom::twist_at(w, 0.5);
+    CHECK(std::fabs(mid_actual - mid_linear) > 1.0 * DEG2RAD);
+}
+
+// Single source of truth: chord_at/xle_at/twist_at/dihedral_at must match the
+// values loft() actually wrote into w.stations at that station's eta (guards
+// massprops/avl_export drift back to independently re-derived geometry).
+TEST(loft_matches_evaluators) {
+    WingGeometry w;
+    w.semi_span = 0.6;
+    w.chord_cp = {0.28, 0.24, 0.22, 0.18, 0.15, 0.11};
+    w.sweep_cp = {0.0, 0.10, 0.20, 0.30, 0.40, 0.55};
+    w.twist_cp = {1.0*DEG2RAD, 0.5*DEG2RAD, -0.5*DEG2RAD, -2.0*DEG2RAD, -3.5*DEG2RAD, -5.0*DEG2RAD};
+    w.dih_cp   = {0.0, 2.0*DEG2RAD, 5.0*DEG2RAD, 10.0*DEG2RAD, 20.0*DEG2RAD, 35.0*DEG2RAD, 50.0*DEG2RAD};
+    w.sections.resize(1);
+    geom::loft(w, 30);
+
+    for (const auto& s : w.stations) {
+        CHECK_NEAR(s.chord, geom::chord_at(w, s.eta), 1e-9);
+        CHECK_NEAR(s.x_le, geom::xle_at(w, s.eta), 1e-9);
+        CHECK_NEAR(s.twist, geom::twist_at(w, s.eta), 1e-9);
+    }
+}
+
+// Non-planar height scales with tip dihedral: a steeper rising tip curve
+// produces a larger nonplanar_h (drives the induced-drag credit); a flat
+// wing (all dih_cp = 0) produces nonplanar_h ~ 0.
+TEST(nonplanar_height_scales_with_tip_dihedral) {
+    WingGeometry flat;
+    flat.semi_span = 0.6;
+    geom::set_linear_planform(flat, 0.25, 0.13, 0.0, 0.0);
+    flat.sections.resize(1);
+    geom::loft(flat, 20);
+    CHECK_NEAR(flat.nonplanar_h, 0.0, 1e-9);
+
+    WingGeometry gentle = flat;
+    gentle.dih_cp = {0.0, 2.0*DEG2RAD, 4.0*DEG2RAD, 6.0*DEG2RAD, 8.0*DEG2RAD, 10.0*DEG2RAD, 12.0*DEG2RAD};
+    geom::loft(gentle, 20);
+
+    WingGeometry steep = flat;
+    steep.dih_cp = {0.0, 5.0*DEG2RAD, 15.0*DEG2RAD, 30.0*DEG2RAD, 45.0*DEG2RAD, 60.0*DEG2RAD, 75.0*DEG2RAD};
+    geom::loft(steep, 20);
+
+    CHECK(gentle.nonplanar_h > flat.nonplanar_h);
+    CHECK(steep.nonplanar_h > gentle.nonplanar_h);
 }

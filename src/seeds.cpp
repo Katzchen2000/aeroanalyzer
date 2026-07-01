@@ -95,10 +95,11 @@ std::vector<std::vector<double>> build_seed_genomes(
     const int n = static_cast<int>(spec.size());
     const int n_elite = std::max(1, count / 5);
     using namespace geom;
-    const int planform[] = {G_ROOT, G_TAPER, G_SEMISPAN, G_SWEEP, G_WASHOUT,
-                            G_BATTERY, G_CS_CHORD, G_AIL_SPAN,
-                            G_CHORD_EXP, G_SWEEP_EXP, G_GULL_A, G_GULL_B, G_GULL_C,
-                            G_WINGLET_CANT, G_WINGLET_ETA};
+    // Planform genes are contiguous indices [0, N_PLANFORM) in the new layout
+    // (semi_span, chord/sweep/twist/dihedral Bezier control points, battery,
+    // cs_chord, ail_span) — no named index list needed.
+    std::vector<int> planform(N_PLANFORM);
+    for (int i = 0; i < N_PLANFORM; ++i) planform[i] = i;
 
     auto clampg = [&](int gi, double v) {
         return std::min(spec.hi[gi], std::max(spec.lo[gi], v));
@@ -123,13 +124,33 @@ std::vector<std::vector<double>> build_seed_genomes(
 
     std::normal_distribution<double> nrm(0.0, 1.0);
 
-    // Curated feasibility anchor for elite seeds: forward battery + max washout
+    // Elite CST pick: elites keep the anchor planform verbatim (no jitter), so
+    // whichever airfoil lands on them must actually clear the avionics keep-out
+    // (half-thickness @ 30% chord vs avionics_half_h). Seed order is directory/
+    // config order (thin foils first in practice), so picking by raw index k
+    // silently starved every elite of thickness. Pick the thickest seed instead.
+    int thick_idx = 0;
+    {
+        double best_t = -1.0;
+        for (int i = 0; i < ns; ++i) {
+            double t = geom::cst_upper(s.airfoils[i], 0.30) - geom::cst_lower(s.airfoils[i], 0.30);
+            if (t > best_t) { best_t = t; thick_idx = i; }
+        }
+    }
+
+    // Curated feasibility anchor for elite seeds: forward battery + tip washout
     // ensures NP aft of CG → SM lands near 6% without burning ~40 gen of spin-up.
+    // Layout matches the contiguous planform block: semi_span, chord_cp[6],
+    // sweep_cp[5], twist_cp[6] (deg), dih_cp[6] (deg), battery, cs_chord, ail_span.
     static const double g_anchor[N_PLANFORM] = {
-        0.26, 0.55, 0.62, 20.0, -5.0,  // root, taper, semi_span, sweep, washout
-        0.03, 0.25, 0.60,  1.2,  1.2,  // battery, cs_chord, ail_span, chord_exp, sweep_exp
-        0.02, 0.00, 0.00,              // gull_a, gull_b, gull_c
-        45.0, 0.85,                     // winglet_cant_deg, winglet_eta
+        0.62,                                    // semi_span, m
+        0.26, 0.24, 0.20, 0.16, 0.13, 0.11,       // chord_cp0..5, m (elliptic-ish taper)
+        0.02, 0.14, 0.35, 0.60, 0.80,             // sweep_cp1..5, x_le/semi_span (gentle root, steep crescent outboard for aft NP shift)
+        1.0, 0.5, -1.5, -3.0, -4.5, -6.0,         // twist_cp0..5, deg (organic tip washout)
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0,             // dih_cp1..6, deg (gentle gull, no raised tip)
+        0.03,                                    // battery_x, m
+        0.25,                                    // cs_chord_frac
+        0.60,                                    // ail_span_frac
     };
 
     for (int k = 0; k < count; ++k) {
@@ -137,8 +158,8 @@ std::vector<std::vector<double>> build_seed_genomes(
         for (int gi = 0; gi < n; ++gi)
             x[gi] = spec.lo[gi] + u(g) * (spec.hi[gi] - spec.lo[gi]);
 
-        const Airfoil& af = s.airfoils[k % s.airfoils.size()];
         bool elite = (k < n_elite);
+        const Airfoil& af = elite ? s.airfoils[thick_idx] : s.airfoils[k % s.airfoils.size()];
 
         // PCA jitter: independent per section; each section delta lies on the
         // realistic-airfoil manifold spanned by the seed library.

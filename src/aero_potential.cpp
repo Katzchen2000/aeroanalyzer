@@ -131,10 +131,11 @@ std::uint64_t geom_signature(const WingGeometry& w) {
         std::memcpy(&b, &d, sizeof(b));
         h = (h ^ b) * 1099511628211ull;        // FNV-1a prime
     };
-    mix(w.root_chord); mix(w.tip_chord); mix(w.semi_span);
-    mix(w.le_sweep); mix(w.washout); mix(w.chord_exp); mix(w.sweep_exp);
-    mix(w.gull_a); mix(w.gull_b); mix(w.gull_c);
-    mix(w.winglet_cant); mix(w.winglet_eta);
+    mix(w.semi_span);
+    for (double v : w.chord_cp) mix(v);
+    for (double v : w.sweep_cp) mix(v);
+    for (double v : w.twist_cp) mix(v);
+    for (double v : w.dih_cp)   mix(v);
     for (const auto& sec : w.sections) {
         mix(sec.te_thick);
         for (double v : sec.wu) mix(v);

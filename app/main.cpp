@@ -261,7 +261,7 @@ int main(int argc, char** argv) {
             WingGeometry rg = r.geom;
             geom::loft(rg, cfg.geti("n_stations_export", 60));
             avl::write_case(stem, rg, r.mp, cfg);
-            avl::write_3d_csv(stem, rg);
+            avl::write_3d_csv(stem, rg, cfg);
             avl::write_stl(stem, rg, cfg);
             // Sidecar: panel reference numbers for validate_avl.ps1 cross-check.
             {

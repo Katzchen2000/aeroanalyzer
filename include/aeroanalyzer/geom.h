@@ -10,35 +10,34 @@ namespace aero {
 namespace geom {
 
 // Design-variable layout. Order matters — keep in sync with decode().
-// Planform genes (fixed indices 0-14); G_SEC() addresses the CST block at 15+.
-// Dropped: G_TE (sharp everywhere; motor pocket via CAD split), G_MODE (fixed Elevon).
-// Added:   G_WINGLET_CANT, G_WINGLET_ETA — organic tip fold.
-// Gull coefficients are now DIMENSIONLESS fractions of semi_span (×b in loft).
-constexpr int G_ROOT         = 0;   // root chord, m
-constexpr int G_TAPER        = 1;   // tip/root chord ratio
-constexpr int G_SEMISPAN     = 2;   // half span, m
-constexpr int G_SWEEP        = 3;   // leading-edge sweep, deg
-constexpr int G_WASHOUT      = 4;   // tip twist, deg (negative = washout)
-constexpr int G_BATTERY      = 5;   // battery-box CG x, m
-constexpr int G_CS_CHORD     = 6;   // control-surface chord fraction [0.15, 0.35]
-constexpr int G_AIL_SPAN     = 7;   // aileron inboard edge, fraction of semi-span [0.40, 0.80]
-constexpr int G_CHORD_EXP    = 8;   // taper power-law exponent (1=linear, >1 curved)
-constexpr int G_SWEEP_EXP    = 9;   // LE sweep power-law exponent (1=linear, >1 crescent)
-constexpr int G_GULL_A       = 10;  // gull dihedral: z(η)=b*(a*η+b*η²+c*η³), dimensionless
-constexpr int G_GULL_B       = 11;  // gull quadratic coeff, dimensionless
-constexpr int G_GULL_C       = 12;  // gull cubic coeff, dimensionless
-constexpr int G_WINGLET_CANT = 13;  // winglet cant angle, deg [0, 80]
-constexpr int G_WINGLET_ETA  = 14;  // winglet fold start, fraction of semi-span [0.75, 0.95]
+// Every spanwise distribution (chord, LE-sweep, twist, dihedral) is a smooth
+// Bezier curve over eta in [0,1] — organic, no faceting, no discrete winglet.
+// The vertical shape is a continuous dihedral-ANGLE curve, arc-integrated in
+// loft(); a smoothly rising angle near the tip is an organic raised tip
+// (gull / bird-wing), with no crease and no separate winglet sub-model.
+// Planform genes (fixed indices 0-26); G_SEC() addresses the CST block at 27+.
+// Dropped: G_TE (sharp everywhere), G_MODE (fixed Elevon), power-law chord/sweep
+// exponents, cubic gull coeffs, winglet cant/eta/blend/taper, bezier_te/fold toggles.
+constexpr int NCP_CHORD = 6;   // chord(eta) Bezier control points (degree 5)
+constexpr int NCP_SWEEP = 6;   // x_le/semi_span(eta) Bezier pts; CP0 pinned to 0 (not a gene)
+constexpr int NCP_TWIST = 6;   // twist(eta) Bezier control points (degree 5)
+constexpr int NCP_DIH   = 7;   // dihedral-angle(eta) Bezier pts; CP0 pinned to 0 (not a gene)
 
-constexpr int N_PLANFORM    = 15;
+constexpr int G_SEMISPAN = 0;                             // half span, m
+constexpr int G_CHORD_CP = G_SEMISPAN + 1;                // NCP_CHORD genes (CP0=root)
+constexpr int G_SWEEP_CP = G_CHORD_CP + NCP_CHORD;        // NCP_SWEEP-1 genes (CP1..CPn)
+constexpr int G_TWIST_CP = G_SWEEP_CP + (NCP_SWEEP - 1);  // NCP_TWIST genes
+constexpr int G_DIH_CP   = G_TWIST_CP + NCP_TWIST;        // NCP_DIH-1 genes (CP1..CPn)
+constexpr int G_BATTERY  = G_DIH_CP + (NCP_DIH - 1);      // battery-box CG x, m
+constexpr int G_CS_CHORD = G_BATTERY + 1;                 // control-surface chord fraction
+constexpr int G_AIL_SPAN = G_CS_CHORD + 1;                // aileron inboard edge, frac semi-span
+
+constexpr int N_PLANFORM    = G_AIL_SPAN + 1;             // 27
 constexpr int N_CST_PER_SEC = 8;   // 4 wu + 4 wl per section
 constexpr int N_SECTIONS    = 5;
-constexpr int N_GENES = N_PLANFORM + N_SECTIONS * N_CST_PER_SEC;  // 55 (base)
-// Bezier extension gene counts (appended after index 54 when toggles active)
-constexpr int N_BEZ_TE   = 4;  // interior TE chord-offset ctrl pts (degree-5 Bezier)
-constexpr int N_BEZ_FOLD = 3;  // interior fold cant ctrl pts (degree-4 Bezier)
+constexpr int N_GENES = N_PLANFORM + N_SECTIONS * N_CST_PER_SEC;  // 67
 
-// Canonical η breakpoints for the 5 control sections.
+// Canonical η breakpoints for the 5 control sections (CST loft only).
 constexpr double SECTION_ETA[5] = {0.0, 0.5, 0.75, 0.875, 1.0};
 
 // Index of CST weight gene: sec 0..4, wl 0=upper/1=lower, i 0..3
@@ -74,6 +73,24 @@ struct ThinAirfoil {
     double cl_alpha = 2.0 * PI;  // per rad
 };
 ThinAirfoil thin_airfoil(const Airfoil& f);
+
+// ---- smooth spanwise evaluators (single source of truth) ----------------
+// Every consumer of chord/x_le/twist/dihedral reads these — never re-derive
+// the wing shape from raw genes/control points elsewhere.
+double chord_at(const WingGeometry& w, double eta);      // m
+double xle_at(const WingGeometry& w, double eta);         // m
+double twist_at(const WingGeometry& w, double eta);       // rad
+double dihedral_at(const WingGeometry& w, double eta);    // rad (local curve angle)
+
+// Test/scratch convenience: build control-point curves that exactly reproduce
+// a straight-line planform (root->tip chord, 0->tip sweep, root->tip twist,
+// flat dihedral) via Bezier's linear-precision property (equally-spaced,
+// arithmetic-progression control points reduce to the straight line exactly).
+// Production genomes go through decode(); this is for hand-built WingGeometry
+// in tests. Assumes w.semi_span is already set. Also fills the derived summary
+// fields (root_chord/tip_chord/le_sweep/washout) for consistency.
+void set_linear_planform(WingGeometry& w, double root_chord, double tip_chord,
+                         double le_sweep_rad, double washout_rad);
 
 // ---- genome -> physical wing -------------------------------------------
 GenomeSpec default_genome(const Config& cfg = {});
