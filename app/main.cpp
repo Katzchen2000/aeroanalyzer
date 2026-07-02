@@ -60,6 +60,8 @@ void print_aero_report(const std::string& stem, const EvalResult& r,
     cout << "\n--- Dynamic stability ---\n";
     w("Dutch-roll damp. zeta", r.aero.dutch_roll_zeta, 3);
     w("Phugoid damp. zeta",    r.aero.phugoid_zeta,    3);
+    w("Spiral time-to-double", r.aero.spiral_t2,       1, "s");
+    w("Effective span eff. e_eff", r.aero.e_eff,       3);
     cout << "    Dutch-roll: ("
          << (r.aero.dutch_roll_zeta >= 0.05 ? "stable"
              : r.aero.dutch_roll_zeta >= 0.0 ? "lightly damped" : "divergent")
@@ -67,6 +69,9 @@ void print_aero_report(const std::string& stem, const EvalResult& r,
     cout << "    Phugoid:    ("
          << (r.aero.phugoid_zeta >= 0.05 ? "stable"
              : r.aero.phugoid_zeta >= 0.0 ? "lightly damped" : "divergent")
+         << ")\n";
+    cout << "    Spiral:     ("
+         << (r.aero.spiral_t2 >= 20.0 ? "stable/slow" : "fast-diverging")
          << ")\n";
 
     cout << "\n--- Banked-turn stability (2g / 60deg bank, no extra solve) ---\n";
@@ -156,7 +161,7 @@ int main(int argc, char** argv) {
     std::ofstream csv("out/pareto.csv");
     csv << "idx,inv_LD,mass_kg,sm_dev,static_margin,span_m,AR,root_c,tip_c,"
            "sweep_deg,washout_deg,CL,CD,hinge_kgcm,roll_helix,mode,"
-           "dutch_roll_zeta,phugoid_zeta,"
+           "dutch_roll_zeta,phugoid_zeta,spiral_t2,e_eff,"
            "cn_beta_turn,dutch_roll_zeta_turn,tip_stall_turn";
     for (std::size_t g = 0; g < eval.spec().size(); ++g)
         csv << "," << eval.spec().names[g];
@@ -177,6 +182,7 @@ int main(int argc, char** argv) {
             << "," << r.aero.hinge_moment << "," << r.aero.roll_helix << ","
             << (r.geom.mode == ControlMode::Elevon ? "elevon" : "split")
             << "," << r.aero.dutch_roll_zeta << "," << r.aero.phugoid_zeta
+            << "," << r.aero.spiral_t2 << "," << r.aero.e_eff
             << "," << r.aero.cn_beta_turn
             << "," << r.aero.dutch_roll_zeta_turn
             << "," << (r.aero.tip_stall_turn ? 1 : 0);
@@ -280,6 +286,8 @@ int main(int argc, char** argv) {
                 sc << "cn_beta              = " << r.aero.cn_beta               << "\n";
                 sc << "dutch_roll_zeta_turn = " << r.aero.dutch_roll_zeta_turn  << "\n";
                 sc << "cn_beta_turn         = " << r.aero.cn_beta_turn          << "\n";
+                sc << "spiral_t2            = " << r.aero.spiral_t2             << "\n";
+                sc << "e_eff                = " << r.aero.e_eff                 << "\n";
                 sc << std::setprecision(4);
                 sc << "batt_box_center = " << r.mp.batt_cx << ", "
                    << r.mp.batt_cy << ", " << r.mp.batt_cz << "\n";

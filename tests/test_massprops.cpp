@@ -40,6 +40,7 @@ TEST(cg_structure_only) {
     cfg.set("mass_battery", "0");
     cfg.set("target_mass_aux", "0");
     cfg.set("mass_servo_each", "0");
+    cfg.set("spar_enable", "0");  // isolate shell+infill centroid; spar has its own test
     MassProps mp = massprops::compute(w, cfg);
     CHECK_NEAR(mp.x_cg, 0.42 * 0.20, 1e-6);
     CHECK(mp.mass > 0.0);
@@ -102,6 +103,29 @@ TEST(prop_clearance_ok_for_short_wing) {
     CHECK(mp.prop_clearance > 0.0);
 }
 
+// Structural mass must scale with true arc length, not projected span -- a
+// dihedral wing has more skin/spar material than a flat wing of the same
+// projected span and chord (root cause of the dihedral reward-hacking fix).
+TEST(dihedral_increases_mass_via_arc_length) {
+    WingGeometry flat = rect_wing();
+
+    WingGeometry curved;
+    curved.semi_span = 0.60;
+    geom::set_linear_planform(curved, 0.20, 0.20, 0.0, 0.0);
+    curved.dih_cp.assign(geom::NCP_DIH, 20.0 * DEG2RAD);
+    curved.dih_cp[0] = 0.0;
+    Airfoil af; af.wu = {0.18, 0.15, 0.12, 0.10};
+    af.wl = {-0.18, -0.15, -0.12, -0.10};
+    af.te_thick = 0.0;
+    curved.sections.assign(1, af);
+    geom::loft(curved, 20);
+
+    Config cfg;
+    MassProps mp_flat   = massprops::compute(flat, cfg);
+    MassProps mp_curved = massprops::compute(curved, cfg);
+    CHECK(mp_curved.mass > mp_flat.mass);
+}
+
 // Spar clearance is finite and bounded by the local half-thickness.
 TEST(spar_clearance_bounded) {
     WingGeometry w = rect_wing();
@@ -110,4 +134,38 @@ TEST(spar_clearance_bounded) {
     double half_t_max = 0.5 * (geom::cst_upper(w.sections[0], 0.15) -
                                geom::cst_lower(w.sections[0], 0.15)) * w.root_chord;
     CHECK(mp.spar_clearance < half_t_max + 1e-9);
+}
+
+// Bending-aware spar mass (Tier 3): longer span at the same chord/area means
+// bigger root bending moment, so spar mass must grow with span.
+TEST(spar_mass_monotonic_with_span) {
+    WingGeometry w_short = rect_wing();  // semi_span 0.60
+
+    WingGeometry w_long;
+    w_long.semi_span = 1.20;
+    geom::set_linear_planform(w_long, 0.20, 0.20, 0.0, 0.0);
+    Airfoil af; af.wu = {0.18, 0.15, 0.12, 0.10};
+    af.wl = {-0.18, -0.15, -0.12, -0.10};
+    af.te_thick = 0.0;
+    w_long.sections.assign(1, af);
+    geom::loft(w_long, 20);
+
+    Config cfg;
+    MassProps mp_short = massprops::compute(w_short, cfg);
+    MassProps mp_long  = massprops::compute(w_long, cfg);
+    CHECK(mp_short.spar_mass > 0.0);
+    CHECK(mp_long.spar_mass > mp_short.spar_mass);
+}
+
+// spar_enable=0 must reproduce the pre-Tier-3 mass exactly (regression guard).
+TEST(spar_enable_toggle_matches_legacy) {
+    WingGeometry w = rect_wing();
+    Config cfg_off; cfg_off.set("spar_enable", "0");
+    MassProps mp_off = massprops::compute(w, cfg_off);
+    CHECK_NEAR(mp_off.spar_mass, 0.0, 1e-12);
+
+    Config cfg_on; cfg_on.set("spar_enable", "1");
+    MassProps mp_on = massprops::compute(w, cfg_on);
+    CHECK(mp_on.spar_mass > 0.0);
+    CHECK(mp_on.mass > mp_off.mass);
 }

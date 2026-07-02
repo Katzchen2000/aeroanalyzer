@@ -581,6 +581,81 @@ double span_efficiency(const std::vector<double>& gamma) {
     return std::max(E_DEGEN, std::min(1.0, e));
 }
 
+// Nonplanar (y,z) Trefftz-plane induced drag. Generalizes the classical
+// planar lifting-line downwash (Anderson eq. 5.19:
+//   w(y) = -(1/4pi) Int (dGamma/dy')/(y-y') dy'
+// which is exactly reproduced by this discretization at zero dihedral -- see
+// tests/test_aero.cpp planar-limit regression) to a bent trace:
+//   1. Trailing vortices shed at STATION boundaries with strength = the
+//      strip-to-strip circulation jump (root: continuous symmetric loading,
+//      no shed vortex; tip: Kutta condition Gamma->0).
+//   2. Self-induced velocity at each STRIP MIDPOINT (offset from the edges,
+//      same anti-singularity trick as bound-vortex/control-point offset in
+//      VLM) via 2D Biot-Savart in the (y,z) cross-plane.
+//   3. Projected onto the local trace normal, then the energy-method integral
+//      D = rho * Int(Gamma * w_n * ds) (Munk) gives the induced drag.
+// gamma is in the code's Gamma/V convention (length units; cl=2*gamma/chord).
+double trefftz_CDi(const WingGeometry& w, const std::vector<double>& gamma,
+                    double V, double S) {
+    const auto& stn = w.stations;
+    const int K = static_cast<int>(stn.size()) - 1;   // n_strips
+    if (K < 1 || V <= 0.0 || S <= 0.0 || static_cast<int>(gamma.size()) < K)
+        return 0.0;
+
+    std::vector<double> dGam(K + 1, 0.0);
+    for (int i = 1; i < K; ++i) dGam[i] = gamma[i - 1] - gamma[i];
+    dGam[K] = gamma[K - 1];
+
+    struct Edge { double y, z, dg; };
+    std::vector<Edge> edges;
+    edges.reserve(2 * K);
+    // Mirror-image trailing vortex carries NEGATED strength: for symmetric
+    // spanwise loading Gamma(-y)=Gamma(y), dGamma/dy is odd about the root,
+    // so the shed-vortex strength on the left half is minus the right half's
+    // (this is what makes the induced downwash w(y) come out EVEN under
+    // y-reflection, as physics requires -- both tips see equal induced drag).
+    // Getting this sign wrong makes w(y) odd instead, which exactly
+    // cancels D when summed over the +y/-y strip pairs below -- CDi==0 always.
+    for (int i = 1; i <= K; ++i) {
+        edges.push_back({ stn[i].y, stn[i].z,  dGam[i]});
+        edges.push_back({-stn[i].y, stn[i].z, -dGam[i]});
+    }
+
+    struct Pt { double y, z, gam, ds, dih; };
+    std::vector<Pt> pts;
+    pts.reserve(2 * K);
+    for (int k = 0; k < K; ++k) {
+        double y_mid   = 0.5 * (stn[k].y + stn[k + 1].y);
+        double z_mid   = 0.5 * (stn[k].z + stn[k + 1].z);
+        double dih_mid = 0.5 * (stn[k].dihedral + stn[k + 1].dihedral);
+        double ds_mid  = std::hypot(stn[k + 1].y - stn[k].y, stn[k + 1].z - stn[k].z);
+        pts.push_back({ y_mid, z_mid, gamma[k], ds_mid,  dih_mid});
+        pts.push_back({-y_mid, z_mid, gamma[k], ds_mid, -dih_mid});
+    }
+
+    double D = 0.0;
+    for (const auto& p : pts) {
+        if (p.gam == 0.0 || p.ds <= 0.0) continue;
+        double sn = std::sin(p.dih), cs = std::cos(p.dih);
+        double wn = 0.0;
+        for (const auto& e : edges) {
+            double dy = p.y - e.y, dz = p.z - e.z;
+            double r2 = dy * dy + dz * dz;
+            if (r2 < 1e-9) continue;
+            wn += (e.dg / (4.0 * PI * r2)) * (dz * sn + dy * cs);
+        }
+        D += p.gam * wn * p.ds;
+    }
+    // D as accumulated above comes out with the opposite overall sign to the
+    // physical drag (verified by hand against a decreasing-outward toy
+    // loading: the antisymmetric mirror above correctly makes w(y) even, but
+    // the Biot-Savart sign convention used for the (dz*sn + dy*cs) projection
+    // is the negative of the physical downwash) -- negate here so CDi>0 for a
+    // real lift distribution instead of being silently clamped to 0 below.
+    double CDi = -2.0 * D / S;   // D here is Gamma_code-scaled; force = rho*V^2*D
+    return std::max(0.0, CDi);
+}
+
 // ---- Pitch-control derivatives (linear flap heuristic; mesh is undeflected,
 //      same model as the VLM path so trim/delta_e behave identically) --------
 }  // namespace
@@ -736,20 +811,35 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     // Total CL including the control-surface increment.
     st.CL = panel_CL + pc.CLde * delta_e;
 
-    // Non-planar CDi: Prandtl-Munk heuristic, keyed to the smooth curve's own
-    // vertical extent (organic tip -> no discrete winglet height to read).
-    // ponytail: nonplanar_h=max|z| treats a broad gentle gull and a tight raised
-    // tip of equal height the same; upgrade to Trefftz if that distinction bites.
-    {
-        double h      = w.nonplanar_h;
-        double k_wl   = cfg.getd("winglet_eff_factor", 0.45);
-        double b_eff  = mp.b_full + k_wl * 2.0 * h;
-        double AR_eff = (mp.S_ref > 0) ? b_eff * b_eff / mp.S_ref : AR;
-        st.CDi = (AR_eff > 0) ? st.CL * st.CL / (PI * e_panel * AR_eff) : 0.0;
+    // The panel mesh is undeflected (the control-surface lift above is a
+    // lumped Glauert-flap analytic correction, not a real deflected panel),
+    // so gamma only carries panel_CL's worth of circulation -- everything
+    // downstream that reads gamma (Trefftz CDi, per-strip cl_local feeding
+    // viscous drag + stall) would silently miss the elevon's lift. Rescale
+    // gamma to the true trimmed CL once, here, before any of that runs.
+    // Trefftz CDi is quadratic in gamma, so this correctly scales induced
+    // drag by (CL/panel_CL)^2 -- confirmed this was the source of a ~40%
+    // e_eff blowup on GA incumbents that trim with large elevon deflection.
+    if (std::fabs(panel_CL) > 1e-9) {
+        double k = st.CL / panel_CL;
+        for (auto& g : gamma) g *= k;
     }
 
-    // ---- Strip viscous coupling over the right half-wing ----------------
+    // Induced drag from the discrete Trefftz-plane (y,z) vortex integral
+    // (trefftz_CDi above) -- the real nonplanar computation, not a planar
+    // AR fudge. Reduces to the planar CL^2/(pi*e*AR) result at zero dihedral
+    // (regression-tested); span_efficiency's Glauert fit (st.e) is kept as a
+    // planar-only reporting diagnostic, e_eff is the honest nonplanar figure.
     const double V    = cfg.getd("v_cruise", V_CRUISE);
+    double CDi_planar = (AR > 0) ? st.CL * st.CL / (PI * e_panel * AR) : 0.0;
+    st.CDi = (t_sys.valid && t_sys.N > 0 && AR > 0)
+                 ? trefftz_CDi(w, gamma, V, mp.S_ref)
+                 : CDi_planar;
+    st.e_eff = (AR > 0 && st.CDi > 1e-12)
+                   ? st.CL * st.CL / (PI * AR * st.CDi)
+                   : st.e;
+
+    // ---- Strip viscous coupling over the right half-wing ----------------
     const double cosL = std::cos(w.le_sweep);
     const double sweep_deg = w.le_sweep * RAD2DEG;
     const double xflow_deg = cfg.getd("sweep_crossflow_deg", 25.0);
@@ -819,7 +909,12 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
         }
         double outer  = std::max(0.0, (t - 0.5) / 0.5);
         double factor = 1.0 + (xflow_fac - 1.0) * ramp * outer;
-        CDp_num += pol.cd * factor * chord * dy;
+        // Wetted (arc-length) strip width for viscous drag -- a curved wing's
+        // real skin area exceeds its projected dy by 1/cos(local dihedral).
+        double phi_avg = 0.5 * (w.stations[sp].dihedral + w.stations[sp + 1].dihedral);
+        double cosphi  = std::cos(phi_avg);
+        double dy_wet  = (cosphi > 1e-6) ? dy / cosphi : dy;
+        CDp_num += pol.cd * factor * chord * dy_wet;
         if (pol.clamped && cl_i > 0.0 && t > 0.6) tip_stall = true;
     }
     st.CDp = (Shalf > 0) ? CDp_num / Shalf : 0.0;

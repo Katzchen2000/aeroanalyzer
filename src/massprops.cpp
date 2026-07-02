@@ -66,7 +66,7 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
         double shell = P_hat * s.chord * t_shell;                // m^2 (thin wall)
         shell = std::min(shell, enclosed);
         double solid = shell + infill * (enclosed - shell);      // equiv solid area
-        double dvol = solid * s.width;                           // m^3
+        double dvol = solid * s.ds;                              // m^3 (true arc length)
         double dm = dvol * rho_mat;                              // kg
         double x_centroid = s.x_le + 0.42 * s.chord;            // ~area centroid
         vol_half  += dvol;
@@ -107,6 +107,55 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
 
     mp.mass = m_struct_full + m_pts;
     mp.x_cg = (mp.mass > 0) ? (mx_struct_full + mx_pts) / mp.mass : 0.0;
+
+    // ---- bending-aware spar mass (plan Tier 3) --------------------------------
+    // Chord-proportional ultimate load -> cumulative shear/moment (tip->root,
+    // projected y for moment arms) -> spar cap area M/(sigma_allow*h) -> mass via
+    // arc length s.ds. Appended to `strips` so the Izz/Ixx loop below picks it up
+    // for free. spar_enable=0 reproduces pre-Tier-3 masses exactly (regression).
+    if (cfg.getb("spar_enable", true) && w.stations.size() >= 2 && mp.mass > 0.0) {
+        double n_ult       = cfg.getd("n_ult", 6.0);
+        double sigma_allow = cfg.getd("spar_sigma_allow", 150e6);  // Pa; ponytail: calibration
+                                                                    // knob, not literal material
+                                                                    // strength -- tune so spar
+                                                                    // mass lands ~10-15% of
+                                                                    // structural mass.
+        double rho_spar    = cfg.getd("spar_density", 1600.0);     // kg/m^3
+        double spar_frac   = cfg.getd("spar_root_frac", 0.15);     // chordwise station (shared
+                                                                    // with the clearance check)
+        double W  = mp.mass * GRAV;      // pre-spar weight estimate; spar is a small fraction
+        double Sr = mp.S_ref;
+
+        int n = (int)w.stations.size();
+        std::vector<double> V(n, 0.0), M(n, 0.0);   // shear, moment; tip (n-1) -> root (0)
+        for (int i = n - 2; i >= 0; --i) {
+            double y0 = w.stations[i].y,     y1 = w.stations[i + 1].y;
+            double Lp0 = n_ult * W * w.stations[i].chord     / Sr;
+            double Lp1 = n_ult * W * w.stations[i + 1].chord / Sr;
+            double dy = y1 - y0;
+            V[i] = V[i + 1] + 0.5 * (Lp0 + Lp1) * dy;
+            M[i] = M[i + 1] + 0.5 * (V[i] + V[i + 1]) * dy;
+        }
+
+        double spar_m_half = 0.0, spar_mx_half = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const auto& s = w.stations[i];
+            double h = std::max((geom::cst_upper(s.af, spar_frac)
+                                 - geom::cst_lower(s.af, spar_frac)) * s.chord, 1e-4);
+            double A = M[i] / (sigma_allow * h);       // spar cap area, m^2
+            double dm = A * rho_spar * s.ds;            // material follows arc length
+            double x_cen = s.x_le + spar_frac * s.chord;
+            spar_m_half  += dm;
+            spar_mx_half += dm * x_cen;
+            strips.push_back({dm, x_cen, s.y, s.z});
+        }
+        double spar_m_full  = 2.0 * spar_m_half;
+        double spar_mx_full = 2.0 * spar_mx_half;
+        double mx_total = mp.mass * mp.x_cg + spar_mx_full;
+        mp.mass += spar_m_full;
+        mp.x_cg = mx_total / mp.mass;
+        mp.spar_mass = spar_m_full;
+    }
 
     // ---- yaw/roll inertia Izz, Ixx about CG -----------------------------------
     // Structural strips: each half-station at ±y contributes factor 2.

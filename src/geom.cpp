@@ -6,13 +6,6 @@
 namespace aero {
 namespace geom {
 
-namespace {
-// Local dihedral angle above this threshold marks a station "in_winglet" for
-// the relaxed chord floor (evaluate.cpp constraint 14). Organic tips have no
-// discrete winglet device, so this is just a steep-curve marker, not a gene.
-constexpr double WINGLET_DIH_THRESHOLD_DEG = 60.0;
-}  // namespace
-
 GenomeSpec default_genome(const Config& cfg) {
     (void)cfg;  // no toggles left; every gene is unconditional
     GenomeSpec g;
@@ -52,14 +45,14 @@ GenomeSpec default_genome(const Config& cfg) {
     }
 
     // Dihedral curve: local curve angle Bezier, deg. CP0 pinned to 0 (root
-    // flat), CP1..CP6 are genes. Capped at 30 deg (was 85) -- near-vertical
-    // folds fall outside the Prandtl-Munk nonplanar CDi correction's valid
-    // regime (aero_panel.cpp) and the GA exploited that gap. decode() also
-    // enforces monotonicity so the curve can't fold then unfold.
+    // flat). Genes are per-CP DELTAS (each in [0, 5] deg), so the decoded angle
+    // is monotone non-decreasing by construction (no order-statistic ratchet)
+    // and the tip is capped at 6*5 = 30 deg. A smooth spanwise delta profile
+    // yields an organic gull/curved tip; a constant delta yields a straight V.
     for (int i = 1; i < NCP_DIH; ++i) {
         char nm[24];
-        std::snprintf(nm, sizeof(nm), "dih_cp%d_deg", i);
-        set(G_DIH_CP + (i - 1), nm, -10.0, 30.0);
+        std::snprintf(nm, sizeof(nm), "dih_dcp%d_deg", i);
+        set(G_DIH_CP + (i - 1), nm, 0.0, 5.0);
     }
 
     set(G_BATTERY,  "battery_x_m",   0.00, 0.22);
@@ -265,10 +258,11 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec, const 
 
     w.dih_cp.resize(NCP_DIH);
     w.dih_cp[0] = 0.0;   // root dihedral pinned flat
-    for (int i = 1; i < NCP_DIH; ++i) {
-        w.dih_cp[i] = clamp(G_DIH_CP + (i - 1)) * DEG2RAD;
-        w.dih_cp[i] = std::max(w.dih_cp[i], w.dih_cp[i - 1]);  // non-decreasing (no fold-then-unfold)
-    }
+    for (int i = 1; i < NCP_DIH; ++i)
+        // Genes are non-negative deltas -> cumulative sum is monotone
+        // non-decreasing without a max() repair (which biased the tip CP toward
+        // the cap regardless of fitness, collapsing the curve to a straight V).
+        w.dih_cp[i] = w.dih_cp[i - 1] + clamp(G_DIH_CP + (i - 1)) * DEG2RAD;
 
     w.battery_x     = clamp(G_BATTERY);
     // ponytail: box-fit clamp moved to massprops::compute() where battery_len_m is available
@@ -282,7 +276,7 @@ WingGeometry decode(const std::vector<double>& g, const GenomeSpec& spec, const 
     w.tip_chord  = chord_at(w, 1.0);
     w.le_sweep   = std::atan2(xle_at(w, 1.0), w.semi_span > 0.0 ? w.semi_span : 1.0);
     w.washout    = twist_at(w, 1.0) - twist_at(w, 0.0);
-    // z_tip / nonplanar_h need the arc-integrated station z; loft() fills them.
+    // z_tip needs the arc-integrated station z; loft() fills it.
 
     w.sections.resize(N_SECTIONS);
     for (int k = 0; k < N_SECTIONS; ++k) {
@@ -332,9 +326,6 @@ void loft(WingGeometry& w, int n) {
         z_arr[i] = z_arr[i-1] + d_arc * std::sin(phi_mid);
         phi_arr[i] = dihedral_at(w, t);
     }
-    double max_abs_z = 0.0;
-    for (int i = 0; i < n; ++i) max_abs_z = std::max(max_abs_z, std::fabs(z_arr[i]));
-    w.nonplanar_h = max_abs_z;
     w.z_tip = (b > 0.0) ? z_arr[n - 1] / b : 0.0;
 
     for (int i = 0; i < n; ++i) {
@@ -347,7 +338,6 @@ void loft(WingGeometry& w, int n) {
         s.chord    = std::max(0.005, chord_at(w, t));   // safety floor only
         s.x_le     = xle_at(w, t);
         s.twist    = twist_at(w, t);
-        s.in_winglet = (phi_arr[i] * RAD2DEG) > WINGLET_DIH_THRESHOLD_DEG;
 
         // piecewise linear blend between K control sections (CST airfoils only)
         int seg = K - 2;
@@ -374,6 +364,11 @@ void loft(WingGeometry& w, int n) {
         double y_lo = (i == 0)     ? yp[0]     : 0.5 * (yp[i-1] + yp[i]);
         double y_hi = (i == n - 1) ? yp[n - 1] : 0.5 * (yp[i]   + yp[i+1]);
         s.width = y_hi - y_lo;
+        // Arc-length twin of width, using the pre-projection arc coord y[] --
+        // real skin/spar material follows the curve, not its cos(dihedral) shadow.
+        double s_lo = (i == 0)     ? y[0]     : 0.5 * (y[i-1] + y[i]);
+        double s_hi = (i == n - 1) ? y[n - 1] : 0.5 * (y[i]   + y[i+1]);
+        s.ds = s_hi - s_lo;
         w.stations[i] = s;
     }
 }

@@ -124,12 +124,9 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     if (min_t < t_floor) cv += 40.0 * (t_floor - min_t) / t_floor;
 
     // (14) chord-collapse: catches extreme exp/gull combos that make tip chord negative.
-    // Winglet stations get a smaller floor (they're lightly loaded and can be narrow).
-    double chord_min_m    = cfg_.getd("chord_min_m", 0.03);
-    double chord_min_wl_m = cfg_.getd("chord_min_winglet_m", 0.015);
+    double chord_min_m = cfg_.getd("chord_min_m", 0.03);
     for (const auto& s : r.geom.stations) {
-        double floor_m = s.in_winglet ? chord_min_wl_m : chord_min_m;
-        if (s.chord < floor_m) cv += 50.0 * (floor_m - s.chord) / floor_m;
+        if (s.chord < chord_min_m) cv += 50.0 * (chord_min_m - s.chord) / chord_min_m;
     }
 
     // (13) surrogate confidence: keep OOD polars from silently passing.
@@ -158,6 +155,14 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     double zph_min = cfg_.getd("phugoid_zeta_min", 0.0);
     if (dyn_pen > 0.0 && zph_min > 0.0 && r.aero.phugoid_zeta < zph_min)
         cv += dyn_pen * (zph_min - r.aero.phugoid_zeta);
+
+    // (19) spiral-mode floor (hard constraint, same pattern as Dutch-roll).
+    // spiral_t2_min default 20s = MIL-F-8785C Level 1 Cat B. This is the honest
+    // demand signal for dihedral on a fin-less flying wing: Dutch-roll (16) is a
+    // ceiling on dihedral, this is the floor. Set to 0 to disable.
+    double t2_min = cfg_.getd("spiral_t2_min", 20.0);
+    if (t2_min > 0.0 && r.aero.spiral_lambda > 0.0 && r.aero.spiral_t2 < t2_min)
+        cv += dyn_pen * (t2_min - r.aero.spiral_t2) / t2_min;
 
     // (17) Banked-turn gates (n·CL; no extra panel solve — same deriv model as cruise)
     // Directional divergence in the turn

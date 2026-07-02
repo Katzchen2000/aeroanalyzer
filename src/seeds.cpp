@@ -147,7 +147,7 @@ std::vector<std::vector<double>> build_seed_genomes(
         0.26, 0.24, 0.20, 0.16, 0.13, 0.11,       // chord_cp0..5, m (elliptic-ish taper)
         0.02, 0.14, 0.35, 0.60, 0.80,             // sweep_cp1..5, x_le/semi_span (gentle root, steep crescent outboard for aft NP shift)
         1.0, 0.5, -1.5, -3.0, -4.5, -6.0,         // twist_cp0..5, deg (organic tip washout)
-        1.0, 2.0, 3.0, 4.0, 5.0, 6.0,             // dih_cp1..6, deg (gentle gull, no raised tip)
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,             // dih_dcp1..6, deg deltas -> cumulative 1..6 deg (gentle gull, no raised tip)
         0.03,                                    // battery_x, m
         0.25,                                    // cs_chord_frac
         0.60,                                    // ail_span_frac
