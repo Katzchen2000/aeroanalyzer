@@ -124,12 +124,9 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     if (min_t < t_floor) cv += 40.0 * (t_floor - min_t) / t_floor;
 
     // (14) chord-collapse: catches extreme exp/gull combos that make tip chord negative.
-    // Winglet stations get a smaller floor (they're lightly loaded and can be narrow).
-    double chord_min_m    = cfg_.getd("chord_min_m", 0.03);
-    double chord_min_wl_m = cfg_.getd("chord_min_winglet_m", 0.015);
+    double chord_min_m = cfg_.getd("chord_min_m", 0.03);
     for (const auto& s : r.geom.stations) {
-        double floor_m = s.in_winglet ? chord_min_wl_m : chord_min_m;
-        if (s.chord < floor_m) cv += 50.0 * (floor_m - s.chord) / floor_m;
+        if (s.chord < chord_min_m) cv += 50.0 * (chord_min_m - s.chord) / chord_min_m;
     }
 
     // (13) surrogate confidence: keep OOD polars from silently passing.

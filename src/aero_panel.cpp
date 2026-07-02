@@ -736,18 +736,13 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     // Total CL including the control-surface increment.
     st.CL = panel_CL + pc.CLde * delta_e;
 
-    // Non-planar CDi: Prandtl-Munk heuristic. Only stations already flagged
-    // in_winglet (local dihedral > WINGLET_DIH_THRESHOLD_DEG, geom.cpp) count
-    // toward h -- a gentle gull curve never crosses that threshold and gets
-    // no effective-span credit; only a genuinely sharp fold does.
-    {
-        double h = 0.0;
-        for (const auto& s : w.stations) if (s.in_winglet) h = std::max(h, std::fabs(s.z));
-        double k_wl   = cfg.getd("winglet_eff_factor", 0.45);
-        double b_eff  = mp.b_full + k_wl * 2.0 * h;
-        double AR_eff = (mp.S_ref > 0) ? b_eff * b_eff / mp.S_ref : AR;
-        st.CDi = (AR_eff > 0) ? st.CL * st.CL / (PI * e_panel * AR_eff) : 0.0;
-    }
+    // Induced drag on the wing's own aspect ratio. There is no nonplanar credit:
+    // the force reduction is extracted on the projected (planar) Trefftz plane,
+    // so a real winglet benefit would need a true nonplanar Trefftz integral, not
+    // a b_eff fudge. The old >60-deg-gated heuristic was unreachable under the
+    // 30-deg dihedral cap (dead code) and was the source of dihedral reward-
+    // hacking, so it is gone.
+    st.CDi = (AR > 0) ? st.CL * st.CL / (PI * e_panel * AR) : 0.0;
 
     // ---- Strip viscous coupling over the right half-wing ----------------
     const double V    = cfg.getd("v_cruise", V_CRUISE);

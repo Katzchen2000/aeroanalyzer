@@ -267,25 +267,26 @@ TEST(loft_matches_evaluators) {
     }
 }
 
-// Non-planar height scales with tip dihedral: a steeper rising tip curve
-// produces a larger nonplanar_h (drives the induced-drag credit); a flat
-// wing (all dih_cp = 0) produces nonplanar_h ~ 0.
-TEST(nonplanar_height_scales_with_tip_dihedral) {
-    WingGeometry flat;
-    flat.semi_span = 0.6;
-    geom::set_linear_planform(flat, 0.25, 0.13, 0.0, 0.0);
-    flat.sections.resize(1);
-    geom::loft(flat, 20);
-    CHECK_NEAR(flat.nonplanar_h, 0.0, 1e-9);
+// Dihedral genes are per-CP deltas: decode cumulatively sums them (no max()
+// ratchet). All-hi genes give an evenly-graded 0,5,10,..30 deg CP ladder;
+// a single non-zero delta stays a low plateau instead of ratcheting to the cap.
+TEST(dihedral_genes_are_cumulative_deltas) {
+    geom::GenomeSpec spec = geom::default_genome();
 
-    WingGeometry gentle = flat;
-    gentle.dih_cp = {0.0, 2.0*DEG2RAD, 4.0*DEG2RAD, 6.0*DEG2RAD, 8.0*DEG2RAD, 10.0*DEG2RAD, 12.0*DEG2RAD};
-    geom::loft(gentle, 20);
+    // All CP deltas at the 5-deg upper bound -> cumulative 0,5,10,15,20,25,30.
+    std::vector<double> hi(spec.size());
+    for (int i = 0; i < (int)spec.size(); ++i) hi[i] = spec.hi[i];
+    WingGeometry wh = geom::decode(hi, spec);
+    for (int i = 0; i < geom::NCP_DIH; ++i)
+        CHECK_NEAR(wh.dih_cp[i], (5.0 * i) * DEG2RAD, 1e-9);
 
-    WingGeometry steep = flat;
-    steep.dih_cp = {0.0, 5.0*DEG2RAD, 15.0*DEG2RAD, 30.0*DEG2RAD, 45.0*DEG2RAD, 60.0*DEG2RAD, 75.0*DEG2RAD};
-    geom::loft(steep, 20);
-
-    CHECK(gentle.nonplanar_h > flat.nonplanar_h);
-    CHECK(steep.nonplanar_h > gentle.nonplanar_h);
+    // Only the first delta non-zero: curve rises 5 deg then holds -- proves the
+    // old running-max ratchet (which forced the tip toward the cap) is gone.
+    std::vector<double> genes(spec.size());
+    for (int i = 0; i < (int)spec.size(); ++i) genes[i] = spec.lo[i];
+    genes[geom::G_DIH_CP] = 5.0;   // dih_dcp1 = 5 deg, rest at lo (0)
+    WingGeometry w = geom::decode(genes, spec);
+    CHECK_NEAR(w.dih_cp[0], 0.0, 1e-9);
+    for (int i = 1; i < geom::NCP_DIH; ++i)
+        CHECK_NEAR(w.dih_cp[i], 5.0 * DEG2RAD, 1e-9);
 }

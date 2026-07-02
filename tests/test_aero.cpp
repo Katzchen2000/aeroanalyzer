@@ -4,6 +4,7 @@
 #include "aeroanalyzer/aero_potential.h"
 #include "aeroanalyzer/aero_viscous.h"
 #include "aeroanalyzer/stability.h"
+#include "aeroanalyzer/control.h"
 #include <string>
 #include <algorithm>
 
@@ -812,14 +813,11 @@ TEST(dynamic_stability_metrics) {
     CHECK(std::fabs(st.phugoid_zeta - zeta_ph_ref) < 1e-10);
 }
 
-// Winglet CDi credit is gated to genuinely sharp corners (local dihedral >
-// WINGLET_DIH_THRESHOLD_DEG = 60, geom.cpp). A smooth curve that rises to 45
-// deg -- gentle enough to be reachable under today's 30-deg-per-CP gene cap
-// once monotonicity is applied elsewhere -- must NOT reduce CDi: that was the
-// dihedral reward-hacking bug (a gentle gull credited as if it were a sharp
-// discrete winglet). Only a curve that actually crosses the 60-deg threshold
-// gets the effective-span bonus.
-TEST(gentle_tip_rise_earns_no_CDi_credit) {
+// Induced drag has no nonplanar credit: raising the tip does not reduce CDi
+// below the plain formula on the wing's own aspect ratio. The old >60-deg-gated
+// b_eff heuristic (unreachable under the 30-deg cap and the source of dihedral
+// reward-hacking) is gone, so ANY dihedral curve gets the plain CDi.
+TEST(dihedral_earns_no_CDi_credit) {
     Config cfg; cfg.set("aero_model", "panel");
     cfg.set("panel_chordwise", "6");
     viscous::Surrogate surr; surr.load("", cfg);
@@ -827,13 +825,10 @@ TEST(gentle_tip_rise_earns_no_CDi_credit) {
     WingGeometry w0 = demo_wing();   // flat dihedral curve (all zero) by default
 
     WingGeometry w1 = demo_wing();
-    // Smooth dihedral-angle curve: flat inboard, rising to a gentle organic
-    // tip -- stays under the 60-deg sharp-corner threshold everywhere.
+    // Smooth dihedral-angle curve rising to a raised organic tip.
     w1.dih_cp = {0.0, 0.0, 5.0 * DEG2RAD, 15.0 * DEG2RAD,
                  30.0 * DEG2RAD, 40.0 * DEG2RAD, 45.0 * DEG2RAD};
     geom::loft(w1, 20);             // re-loft with the raised tip applied
-    CHECK(w1.nonplanar_h > 0.0);    // curve actually left the plane
-    for (const auto& s : w1.stations) CHECK(!s.in_winglet);   // never crosses 60 deg
 
     double alpha = 4.0 * DEG2RAD;
     MassProps mp0 = massprops::compute(w0, cfg);
@@ -842,28 +837,55 @@ TEST(gentle_tip_rise_earns_no_CDi_credit) {
     AeroState st1 = potential::solve(w1, mp1, surr, cfg, alpha, 0.0);
 
     CHECK(st0.CDi > 0.0);
-    // No credit: CDi must match the plain formula on the wing's own (un-bumped) AR.
+    // No credit: CDi must match the plain formula on the wing's own AR.
     CHECK_NEAR(st1.CDi, st1.CL * st1.CL / (PI * st1.e * mp1.AR), 1e-9);
 }
 
-// A curve that actually crosses the sharp-corner threshold (>60 deg) still
-// earns the effective-span CDi credit -- the gate only excludes gentle curves.
-TEST(sharp_tip_fold_earns_CDi_credit) {
-    Config cfg; cfg.set("aero_model", "panel");
-    cfg.set("panel_chordwise", "6");
-    viscous::Surrogate surr; surr.load("", cfg);
+// Cl_beta is shape-aware: at EQUAL tip height, a gull (dihedral concentrated
+// outboard, long roll moment arm) earns more roll restoring than a straight
+// constant-angle V. This is what makes the GA prefer a smooth curve instead of
+// folding sharply at the root -- the old atan(z_tip)-only credit made these two
+// identical, so the arc-length-cheapest straight V always won.
+TEST(cl_beta_rewards_outboard_dihedral) {
+    Config cfg;
+    const double b = 0.6;            // semi-span
+    const double c = 0.2;            // constant chord
+    const int    N = 20;
+    const double dy = b / N;
 
-    WingGeometry w = demo_wing();
-    w.dih_cp = {0.0, 0.0, 5.0 * DEG2RAD, 20.0 * DEG2RAD,
-               45.0 * DEG2RAD, 65.0 * DEG2RAD, 75.0 * DEG2RAD};
-    geom::loft(w, 20);
-    bool any_winglet = false;
-    for (const auto& s : w.stations) if (s.in_winglet) any_winglet = true;
-    CHECK(any_winglet);   // curve does cross the 60-deg threshold near the tip
+    // Full-span planform props (zero sweep so cl_beta is pure dihedral term).
+    MassProps mp; mp.b_full = 2.0 * b; mp.S_ref = 2.0 * c * b;  // AR = 6
 
-    double alpha = 4.0 * DEG2RAD;
-    MassProps mp = massprops::compute(w, cfg);
-    AeroState st = potential::solve(w, mp, surr, cfg, alpha, 0.0);
-    // Credit applied: CDi must be strictly BELOW the un-bumped formula.
-    CHECK(st.CDi < st.CL * st.CL / (PI * st.e * mp.AR));
+    auto make = [&](double phi_inboard_deg, double phi_outboard_deg) {
+        WingGeometry w;
+        w.semi_span = b; w.le_sweep = 0.0;
+        double z = 0.0;
+        for (int i = 0; i < N; ++i) {
+            double y = (i + 0.5) * dy;
+            double phi = (y < 0.5 * b ? phi_inboard_deg : phi_outboard_deg) * DEG2RAD;
+            Station s; s.y = y; s.chord = c; s.width = dy; s.dihedral = phi;
+            w.stations.push_back(s);
+            z += dy * std::sin(phi);
+        }
+        w.z_tip = z / b;   // dimensionless tip rise (old-formula input)
+        return w;
+    };
+
+    // Straight V: constant 10 deg. Gull: 0 inboard, asin(2 sin10) outboard so
+    // the arc-integrated tip height matches the V exactly.
+    WingGeometry wV = make(10.0, 10.0);
+    double phi_out = std::asin(2.0 * std::sin(10.0 * DEG2RAD)) * RAD2DEG;  // ~20.4 deg
+    WingGeometry wG = make(0.0, phi_out);
+    CHECK_NEAR(wV.z_tip, wG.z_tip, 1e-6);   // equal tip height
+
+    auto ldV = control::lateral_derivs(wV, mp, 0.5, 0.02, cfg);
+    auto ldG = control::lateral_derivs(wG, mp, 0.5, 0.02, cfg);
+
+    CHECK(ldV.cl_beta < 0.0);              // both roll-restoring
+    CHECK(ldG.cl_beta < ldV.cl_beta);      // gull earns MORE (more negative)
+
+    // Constant-phi V still matches the old atan(z_tip) credit to within 10%.
+    double AR = mp.b_full * mp.b_full / mp.S_ref;
+    double old_cl_beta = -std::atan(wV.z_tip) * 0.5 * AR / (2.0 * (AR + 4.0));
+    CHECK(std::fabs(ldV.cl_beta - old_cl_beta) < 0.10 * std::fabs(old_cl_beta));
 }

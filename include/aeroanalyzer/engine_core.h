@@ -47,8 +47,6 @@ struct Station {
     double ds       = 0.0;   // true arc-length strip width, m (mass/material — NOT cosine-projected)
     double dihedral = 0.0;   // local section normal tilt, rad (0=flat, π/2=vertical)
     double eta      = 0.0;   // normalised span parameter t=y_flat/semi_span
-    bool in_winglet = false;  // true where local dihedral angle exceeds the
-                              // steep-dihedral threshold (config); relaxed chord floor
     Airfoil af;            // lofted section shape at this station (root->tip blend)
 };
 
@@ -70,7 +68,6 @@ struct WingGeometry {
     double le_sweep    = 0.0;   // rad, net representative sweep = atan2(xle_at(1), semi_span)
     double washout     = 0.0;   // rad, = twist_at(1) - twist_at(0)
     double z_tip       = 0.0;   // dimensionless, = z(tip)/semi_span
-    double nonplanar_h = 0.0;   // m, max|z| over stations (non-planar CDi driver)
     std::vector<Airfoil> sections;  // K control sections; loft() blends piecewise
     ControlMode mode = ControlMode::Elevon;  // ponytail: fixed; G_MODE gene dropped
     double battery_x     = 0.05;  // battery-box CG x location, m (CG trim handle)

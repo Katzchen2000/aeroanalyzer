@@ -197,10 +197,21 @@ LateralDerivs lateral_derivs(const WingGeometry& w, const MassProps& mp,
     ld.cn_r = cn_r_scale * (-8.0 * CD * roll_damp / (S * b * b));
 
     // Cl_beta: roll-due-to-sideslip (dihedral + sweep contributions).
-    // Dihedral term: use mean effective dihedral = atan(z_tip / semi_span).
-    // w.z_tip is already dimensionless (z(tip)/semi_span) from the arc-
-    // integrated smooth dihedral curve.
-    double eff_dihedral = (w.semi_span > 0.0) ? std::atan(w.z_tip) : 0.0;
+    // Dihedral term: effective dihedral = spanwise average of the LOCAL dihedral
+    // angle, weighted by roll moment arm (chord * y * width). This makes the
+    // credit shape-dependent: outboard dihedral (long moment arm) is worth more
+    // than the same tip height reached by folding sharply at the root. For a
+    // constant-angle wing the weighted average collapses to that angle, matching
+    // the old atan(z_tip) form to first order, so the Dutch-roll calibration is
+    // preserved. Falls back to atan(z_tip) when no stations are lofted.
+    double dih_num = 0.0, dih_den = 0.0;
+    for (const auto& s : w.stations) {
+        double wgt = s.chord * s.y * s.width;
+        dih_num += s.dihedral * wgt;
+        dih_den += wgt;
+    }
+    double eff_dihedral = (dih_den > 0.0) ? dih_num / dih_den
+                        : ((w.semi_span > 0.0) ? std::atan(w.z_tip) : 0.0);
     double cl_beta_dihedral = -eff_dihedral * CL * AR / (2.0 * (AR + 4.0));
     // Sweep term: Perkins & Hage swept-wing approximation.
     double cl_beta_sweep    = -CL * AR * std::tan(w.le_sweep) / (4.0 * (AR + 4.0));
