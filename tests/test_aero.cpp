@@ -44,7 +44,14 @@ static WingGeometry demo_wing() {
     return w;
 }
 
-// Internal consistency: reported induced drag matches CL^2/(pi e AR).
+// Planar-limit regression (mandatory per the Trefftz-CDi plan): a flat wing
+// (zero dihedral) has no z-extent, so the discrete nonplanar Trefftz integral
+// must closely reproduce the classical planar CL^2/(pi e AR) result. Not an
+// exact match (it's a genuinely different discrete computation, no longer the
+// same formula copy-pasted into st.CDi). At the GA's default n_stations=20
+// the gap is ~2.7%, confirmed by a station-count sweep (20/40/80/160: rel_err
+// 2.74%/1.25%/0.47%/0.19%, ~2nd-order convergence) to be discretization error,
+// not a residual formula bug -- 3.5% gives headroom above the measured floor.
 TEST(induced_drag_consistency) {
     WingGeometry w = demo_wing();
     Config cfg;
@@ -52,15 +59,20 @@ TEST(induced_drag_consistency) {
     viscous::Surrogate surr; surr.load("", cfg);
     AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
     double cdi = st.CL * st.CL / (PI * st.e * mp.AR);
-    CHECK_NEAR(st.CDi, cdi, 1e-9);
+    CHECK(st.CDi > 0.0);
+    CHECK(std::fabs(st.CDi - cdi) / cdi < 0.035);
     CHECK(st.CL > 0.0);   // positive incidence -> positive lift
     CHECK(st.CDp > 0.0);  // viscous floor
 }
 
-// Winglet CDi credit must be gated to genuinely sharp (>60 deg) corners -- a
-// wing curved to today's 30-deg gene cap earns NO effective-span bonus, so
-// CDi must reduce to the plain CL^2/(pi*e*AR) formula (dihedral reward-hack fix).
-TEST(gentle_dihedral_earns_no_winglet_credit) {
+// Real nonplanar physics (Tier 2): a wing curved to today's 30-deg gene cap
+// is a genuine bent lifting line, not a flat wing wearing a cosmetic curve, so
+// the honest Trefftz integral must show a MEASURABLE nonplanar effect --
+// e_eff at the raised tip should differ from the flat-wing planar e (the old
+// ">60 deg or no credit" gate was a workaround for the crude Prandtl-Munk
+// heuristic and is gone; Tier 2 replaces it with real vortex-plane physics
+// that responds continuously to shape, not a step function at 60 deg).
+TEST(gentle_dihedral_earns_real_nonplanar_effect) {
     WingGeometry w;
     w.semi_span = 0.6;
     geom::set_linear_planform(w, 0.25, 0.13, 0.0, 0.0);
@@ -76,8 +88,9 @@ TEST(gentle_dihedral_earns_no_winglet_credit) {
     MassProps mp = massprops::compute(w, cfg);
     viscous::Surrogate surr; surr.load("", cfg);
     AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
-    double cdi = st.CL * st.CL / (PI * st.e * mp.AR);
-    CHECK_NEAR(st.CDi, cdi, 1e-9);
+    double cdi_flat_formula = st.CL * st.CL / (PI * st.e * mp.AR);
+    CHECK(st.CDi > 0.0);
+    CHECK(std::fabs(st.CDi - cdi_flat_formula) / cdi_flat_formula > 1e-4);
 }
 
 // Viscous drag must charge for the true (arc-length) wetted area -- a curved
@@ -402,8 +415,9 @@ TEST(panel_elliptic_e_near_one) {
     CHECK(st.e > 0.90 && st.e <= 1.0);
 }
 
-// Panel induced drag is internally consistent: CDi == CL^2/(pi e AR), with e the
-// computed span efficiency (mirrors induced_drag_consistency on the panel path).
+// Panel induced drag planar-limit regression (mirrors induced_drag_consistency
+// on the panel path): flat wing -> Trefftz CDi within 3.5% of CL^2/(pi e AR)
+// (see induced_drag_consistency for the convergence-sweep justification).
 TEST(panel_induced_drag_consistency) {
     Config cfg; cfg.set("aero_model", "panel");
     cfg.set("panel_chordwise", "10"); cfg.set("panel_wake_chords", "20");
@@ -412,9 +426,31 @@ TEST(panel_induced_drag_consistency) {
     MassProps mp = massprops::compute(w, cfg);
     AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
     double cdi = st.CL * st.CL / (PI * st.e * mp.AR);
-    CHECK_NEAR(st.CDi, cdi, 1e-9);
+    CHECK(st.CDi > 0.0);
+    CHECK(std::fabs(st.CDi - cdi) / cdi < 0.035);
     CHECK(st.CL > 0.0);
     CHECK(st.CDp > 0.0);
+}
+
+// Elevon-deflected CDi self-consistency: a large control-surface deflection
+// (routine for a tailless flying wing's trim) adds lift via a lumped
+// Glauert-flap correction on an undeflected panel mesh (gamma), so gamma by
+// itself only carries panel_CL. Before the gamma-rescale fix in solve(),
+// Trefftz CDi was built straight off that pre-elevon gamma while e_eff used
+// the post-elevon CL -- CDi/e_eff came out ~40% too optimistic on GA
+// incumbents that trim with 8-9 deg of delta_e. Guards against that
+// regressing: with a large explicit delta_e, CDi must still satisfy the
+// same planar-limit tolerance as the undeflected case.
+TEST(panel_elevon_trim_induced_drag_consistency) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "10"); cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 9.0 * DEG2RAD);
+    double cdi = st.CL * st.CL / (PI * st.e * mp.AR);
+    CHECK(st.CDi > 0.0);
+    CHECK(std::fabs(st.CDi - cdi) / cdi < 0.035);
 }
 
 // Trim drives CL to the weight requirement and Cm to zero under the panel solver
@@ -813,11 +849,79 @@ TEST(dynamic_stability_metrics) {
     CHECK(std::fabs(st.phugoid_zeta - zeta_ph_ref) < 1e-10);
 }
 
-// Induced drag has no nonplanar credit: raising the tip does not reduce CDi
-// below the plain formula on the wing's own aspect ratio. The old >60-deg-gated
-// b_eff heuristic (unreachable under the 30-deg cap and the source of dihedral
-// reward-hacking) is gone, so ANY dihedral curve gets the plain CDi.
-TEST(dihedral_earns_no_CDi_credit) {
+// Spiral-mode formula check (Tier 1 plan): lambda_spiral = (Lb*Nr - Nb*Lr)/Lb
+// (Nelson, Flight Stability and Automatic Control, eq. 5.61). Independently
+// re-derive Lb/Lp/Lr/Nb/Nr from the public control::lateral_derivs API and
+// mp.Izz/Ixx, exactly as stability.cpp's internal lat_derivs lambda does, and
+// cross-check against the value stability::trim() actually reports.
+TEST(spiral_mode_matches_nelson_formula) {
+    Config cfg;
+    cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    cfg.set("panel_wake_chords", "20");
+    viscous::Surrogate surr; surr.load("", cfg);
+    WingGeometry w = demo_wing();   // 18 deg sweep
+    MassProps mp = massprops::compute(w, cfg);
+
+    AeroState st = stability::trim(w, mp, surr, cfg);
+    CHECK(st.trimmed);
+    CHECK(mp.Izz > 0.0);
+    CHECK(mp.Ixx > 0.0);
+
+    double V = cfg.getd("v_cruise", V_CRUISE);
+    auto ld = control::lateral_derivs(w, mp, st.CL, st.CD, cfg);
+    double qSb  = 0.5 * RHO * V * V * mp.S_ref * mp.b_full;
+    double qSb2 = qSb * mp.b_full / (2.0 * V);
+    double Lb = qSb  * ld.cl_beta / mp.Ixx;
+    double Lr = qSb2 * ld.cl_r    / mp.Ixx;
+    double Nb = qSb  * ld.cn_beta / mp.Izz;
+    double Nr = qSb2 * ld.cn_r    / mp.Izz;
+    double lambda_ref = (Lb * Nr - Nb * Lr) / Lb;
+    double t2_ref = (lambda_ref > 1e-9) ? std::log(2.0) / lambda_ref : 1e9;
+
+    CHECK(std::fabs(st.spiral_lambda - lambda_ref) < 1e-9);
+    CHECK(std::fabs(st.spiral_t2 - t2_ref) < 1e-6 * std::max(1.0, t2_ref));
+
+    // Sign sanity: root chord is unswept-tail-less flying wing with real
+    // dihedral in demo_wing() -> Lb must be negative (roll-restoring).
+    CHECK(Lb < 0.0);
+}
+
+// Physical lever check: adding dihedral makes Cl_beta more negative (Lb more
+// negative), which per the Nelson formula pushes lambda_spiral toward Nr (more
+// stable) as |Lb| grows -- this is the honest demand signal Tier 1 creates for
+// dihedral. Hold alpha fixed (rather than full trim) so the comparison isn't
+// confounded by dihedral's own arc-length mass penalty shifting the trimmed CL.
+TEST(spiral_lever_cl_beta_strengthens_with_dihedral) {
+    Config cfg;
+    cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    WingGeometry w0 = demo_wing();   // flat (no dihedral)
+    WingGeometry w1 = demo_wing();
+    w1.dih_cp.assign(geom::NCP_DIH, 20.0 * DEG2RAD);
+    w1.dih_cp[0] = 0.0;
+    geom::loft(w1, 20);
+
+    double alpha = 4.0 * DEG2RAD;
+    MassProps mp0 = massprops::compute(w0, cfg);
+    MassProps mp1 = massprops::compute(w1, cfg);
+    AeroState st0 = potential::solve(w0, mp0, surr, cfg, alpha, 0.0);
+    AeroState st1 = potential::solve(w1, mp1, surr, cfg, alpha, 0.0);
+
+    auto ld0 = control::lateral_derivs(w0, mp0, st0.CL, st0.CD, cfg);
+    auto ld1 = control::lateral_derivs(w1, mp1, st1.CL, st1.CD, cfg);
+    CHECK(ld1.cl_beta < ld0.cl_beta);   // more negative = more roll-restoring
+}
+
+// Trefftz sanity check (Tier 2 plan): a real nonplanar Trefftz-plane integral
+// must show curvature paying off aerodynamically, the way a real winglet
+// does -- bending the tip out of plane at fixed projected span raises the
+// effective span efficiency above the flat wing's planar e. (The old crude
+// heuristic this replaced was gated off below 60 deg specifically because it
+// couldn't be trusted; the honest vortex integral has no such gate.)
+TEST(dihedral_earns_real_CDi_effect) {
     Config cfg; cfg.set("aero_model", "panel");
     cfg.set("panel_chordwise", "6");
     viscous::Surrogate surr; surr.load("", cfg);
@@ -837,8 +941,8 @@ TEST(dihedral_earns_no_CDi_credit) {
     AeroState st1 = potential::solve(w1, mp1, surr, cfg, alpha, 0.0);
 
     CHECK(st0.CDi > 0.0);
-    // No credit: CDi must match the plain formula on the wing's own AR.
-    CHECK_NEAR(st1.CDi, st1.CL * st1.CL / (PI * st1.e * mp1.AR), 1e-9);
+    CHECK(st1.CDi > 0.0);
+    CHECK(st1.e_eff > st0.e);   // curved tip beats the flat wing's planar e
 }
 
 // Cl_beta is shape-aware: at EQUAL tip height, a gull (dihedral concentrated

@@ -156,6 +156,14 @@ EvalResult Evaluator::run(const std::vector<double>& genes, bool relaxed_wake) c
     if (dyn_pen > 0.0 && zph_min > 0.0 && r.aero.phugoid_zeta < zph_min)
         cv += dyn_pen * (zph_min - r.aero.phugoid_zeta);
 
+    // (19) spiral-mode floor (hard constraint, same pattern as Dutch-roll).
+    // spiral_t2_min default 20s = MIL-F-8785C Level 1 Cat B. This is the honest
+    // demand signal for dihedral on a fin-less flying wing: Dutch-roll (16) is a
+    // ceiling on dihedral, this is the floor. Set to 0 to disable.
+    double t2_min = cfg_.getd("spiral_t2_min", 20.0);
+    if (t2_min > 0.0 && r.aero.spiral_lambda > 0.0 && r.aero.spiral_t2 < t2_min)
+        cv += dyn_pen * (t2_min - r.aero.spiral_t2) / t2_min;
+
     // (17) Banked-turn gates (n·CL; no extra panel solve — same deriv model as cruise)
     // Directional divergence in the turn
     if (r.aero.cn_beta_turn <= 0.0)

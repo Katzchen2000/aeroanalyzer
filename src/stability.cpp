@@ -110,25 +110,42 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
 
     // ---- Dutch-roll helper (used twice: cruise + banked-turn) ---------------
     struct DrResult { double omega = 0.0, zeta = 0.0; };
-    auto dutch_roll = [&](const control::LateralDerivs& ld, double cl_p_val,
-                          double CL_val, double CD_val) -> DrResult {
-        if (mp.Izz <= 0.0 || mp.Ixx <= 0.0 || ld.cn_beta <= 0.0)
-            return {0.0, (ld.cn_beta <= 0.0) ? -1.0 : 0.0};
+    struct LatDerivs { double Lb, Lp, Lr, Nb, Nr, Np; bool valid; };
+    auto lat_derivs = [&](const control::LateralDerivs& ld) -> LatDerivs {
+        if (mp.Izz <= 0.0 || mp.Ixx <= 0.0) return {0,0,0,0,0,0,false};
         const double qSb  = 0.5 * RHO * V * V * mp.S_ref * mp.b_full;
         const double qSb2 = qSb * mp.b_full / (2.0 * V);
-        double Lb = qSb  * ld.cl_beta  / mp.Ixx;
-        double Lp = qSb2 * cl_p_val    / mp.Ixx;
-        double Lr = qSb2 * ld.cl_r     / mp.Ixx;
-        double Nb = qSb  * ld.cn_beta  / mp.Izz;
-        double Nr = qSb2 * ld.cn_r     / mp.Izz;
-        double Np = qSb2 * ld.cn_p     / mp.Izz;
-        double omega2      = (std::fabs(Lp) > 1e-9) ? Nb - (Lb * Np) / Lp : Nb;
-        double two_zeta_om = (std::fabs(Lp) > 1e-9) ? -Nr + (Lr * Np) / Lp : -Nr;
+        LatDerivs d;
+        d.Lb = qSb  * ld.cl_beta  / mp.Ixx;
+        d.Lp = qSb2 * st.cl_p     / mp.Ixx;
+        d.Lr = qSb2 * ld.cl_r     / mp.Ixx;
+        d.Nb = qSb  * ld.cn_beta  / mp.Izz;
+        d.Nr = qSb2 * ld.cn_r     / mp.Izz;
+        d.Np = qSb2 * ld.cn_p     / mp.Izz;
+        d.valid = true;
+        return d;
+    };
+    auto dutch_roll = [&](const LatDerivs& d, const control::LateralDerivs& ld) -> DrResult {
+        if (!d.valid || ld.cn_beta <= 0.0)
+            return {0.0, (ld.cn_beta <= 0.0) ? -1.0 : 0.0};
+        double omega2      = (std::fabs(d.Lp) > 1e-9) ? d.Nb - (d.Lb * d.Np) / d.Lp : d.Nb;
+        double two_zeta_om = (std::fabs(d.Lp) > 1e-9) ? -d.Nr + (d.Lr * d.Np) / d.Lp : -d.Nr;
         if (omega2 <= 0.0) return {0.0, -1.0};
         DrResult dr;
         dr.omega = std::sqrt(omega2);
         dr.zeta  = two_zeta_om / (2.0 * dr.omega);
         return dr;
+    };
+    // ---- Spiral-mode helper: 1-DOF classical approximation (Nelson eq. 5.61).
+    // lambda = (Lb*Nr - Nb*Lr) / Lb ; stable iff Lb*Nr - Nb*Lr > 0 (Lb<0 normally).
+    // Dihedral raises |Lb| (Cl_beta more negative) -> this is the honest demand
+    // signal for dihedral on a fin-less flying wing (weak Cn_r, no Cn_beta-only source).
+    auto spiral = [&](const LatDerivs& d) -> double {
+        if (!d.valid || std::fabs(d.Lb) < 1e-9) return 0.0;  // N-A -> report neutral
+        return (d.Lb * d.Nr - d.Nb * d.Lr) / d.Lb;
+    };
+    auto spiral_t2 = [](double lambda) -> double {
+        return (lambda > 1e-9) ? std::log(2.0) / lambda : 1e9;
     };
 
     // ---- Dynamic stability: cruise point ------------------------------------
@@ -137,9 +154,13 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
         st.cn_beta = ld.cn_beta;
         st.cn_r    = ld.cn_r;
 
-        auto dr = dutch_roll(ld, st.cl_p, st.CL, st.CD);
+        auto d = lat_derivs(ld);
+        auto dr = dutch_roll(d, ld);
         st.dutch_roll_omega = dr.omega;
         st.dutch_roll_zeta  = dr.zeta;
+
+        st.spiral_lambda = spiral(d);
+        st.spiral_t2     = spiral_t2(st.spiral_lambda);
 
         // Phugoid: Lanchester approximation  zeta_ph = CD / (sqrt(2) * CL)
         st.phugoid_zeta = (st.CL > 1e-9) ? st.CD / (std::sqrt(2.0) * st.CL) : 0.0;
@@ -154,8 +175,10 @@ AeroState trim(const WingGeometry& w, const MassProps& mp,
         double CD_t   = st.CDp + CDi_t;
         auto ld_t = control::lateral_derivs(w, mp, CL_t, CD_t, cfg);
         st.cn_beta_turn = ld_t.cn_beta;
-        auto dr_t = dutch_roll(ld_t, st.cl_p, CL_t, CD_t);
+        auto d_t = lat_derivs(ld_t);
+        auto dr_t = dutch_roll(d_t, ld_t);
         st.dutch_roll_zeta_turn = dr_t.zeta;
+        st.spiral_t2_turn = spiral_t2(spiral(d_t));
 
         // Tip-stall proxy: outboard station cl scales with n
         double cl_max_t = cfg.getd("cl_max_turn", 1.2);

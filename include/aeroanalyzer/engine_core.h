@@ -91,6 +91,7 @@ struct MassProps {
     double prop_clearance  = 1.0;  // min wing-TE to prop disk, m (neg = intrusion)
     double Izz            = 0.0;  // yaw moment of inertia about CG, kg*m^2
     double Ixx            = 0.0;  // roll moment of inertia about CG, kg*m^2
+    double spar_mass       = 0.0;  // kg, full wing (bending-sized spar cap, both halves)
     // Battery box geometry (report/CAD only; point-mass model unchanged).
     // ponytail: y/z are report-only; add a fit-check gate when those matter.
     double batt_cx = 0.0, batt_cy = 0.0, batt_cz = 0.0;  // box center, m
@@ -102,7 +103,8 @@ struct AeroState {
     double alpha = 0.0;       // trimmed angle of attack, rad
     double delta_e = 0.0;     // elevator/elevon deflection, rad
     double CL = 0.0, CD = 0.0, CDi = 0.0, CDp = 0.0, CM = 0.0;
-    double e = 1.0;           // span efficiency
+    double e = 1.0;           // planar Glauert-fit span efficiency (diagnostic only)
+    double e_eff = 1.0;       // effective efficiency from the nonplanar Trefftz CDi
     double x_np = 0.0;        // neutral point, m
     double x_np_high = 0.0;   // neutral point re-evaluated at high alpha, m
     double static_margin = 0.0;  // (x_np - x_cg)/MAC
@@ -116,6 +118,8 @@ struct AeroState {
     double dutch_roll_zeta  = 0.0; // Dutch-roll damping ratio (<0 = divergent)
     double dutch_roll_omega = 0.0; // Dutch-roll natural frequency, rad/s
     double phugoid_zeta     = 0.0; // phugoid damping ratio (Lanchester)
+    double spiral_lambda    = 0.0; // spiral mode root, 1/s (>0 = divergent)
+    double spiral_t2        = 1e9; // time to double amplitude, s (1e9 = stable/N-A)
     double polar_confidence = 1.0; // minimum section-polar confidence seen
     std::vector<double> cl_local;  // per-station local lift coefficient
     bool tip_stall = false;
@@ -123,6 +127,7 @@ struct AeroState {
     // Banked-turn predictions (n·CL_cruise; zero extra panel solve)
     double cn_beta_turn        = 0.0; // weathercock stability at turn CL
     double dutch_roll_zeta_turn = 0.0; // dutch-roll damping at turn CL
+    double spiral_t2_turn      = 1e9; // spiral time-to-double at turn CL, s
     bool   tip_stall_turn      = false; // tip-stall proxy at load factor
 };
 
