@@ -56,6 +56,56 @@ TEST(induced_drag_consistency) {
     CHECK(st.CDp > 0.0);  // viscous floor
 }
 
+// Winglet CDi credit must be gated to genuinely sharp (>60 deg) corners -- a
+// wing curved to today's 30-deg gene cap earns NO effective-span bonus, so
+// CDi must reduce to the plain CL^2/(pi*e*AR) formula (dihedral reward-hack fix).
+TEST(gentle_dihedral_earns_no_winglet_credit) {
+    WingGeometry w;
+    w.semi_span = 0.6;
+    geom::set_linear_planform(w, 0.25, 0.13, 0.0, 0.0);
+    w.dih_cp.assign(geom::NCP_DIH, 20.0 * DEG2RAD);
+    w.dih_cp[0] = 0.0;
+    Airfoil af; af.wu = {0.18, 0.15, 0.12, 0.10};
+    af.wl = {-0.18, -0.15, -0.12, -0.10};
+    af.te_thick = 0.0;
+    w.sections.assign(1, af);
+    geom::loft(w, 20);
+
+    Config cfg;
+    MassProps mp = massprops::compute(w, cfg);
+    viscous::Surrogate surr; surr.load("", cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    double cdi = st.CL * st.CL / (PI * st.e * mp.AR);
+    CHECK_NEAR(st.CDi, cdi, 1e-9);
+}
+
+// Viscous drag must charge for the true (arc-length) wetted area -- a curved
+// wing has more wetted surface than a flat wing of the same projected chord
+// and span, so its CDp must be strictly larger at the same alpha.
+TEST(curved_wing_has_higher_viscous_drag) {
+    WingGeometry flat;
+    flat.semi_span = 0.6;
+    geom::set_linear_planform(flat, 0.25, 0.13, 0.0, 0.0);
+    Airfoil af; af.wu = {0.18, 0.15, 0.12, 0.10};
+    af.wl = {-0.18, -0.15, -0.12, -0.10};
+    af.te_thick = 0.0;
+    flat.sections.assign(1, af);
+    geom::loft(flat, 20);
+
+    WingGeometry curved = flat;
+    curved.dih_cp.assign(geom::NCP_DIH, 20.0 * DEG2RAD);
+    curved.dih_cp[0] = 0.0;
+    geom::loft(curved, 20);
+
+    Config cfg;
+    MassProps mp_flat   = massprops::compute(flat, cfg);
+    MassProps mp_curved = massprops::compute(curved, cfg);
+    viscous::Surrogate surr; surr.load("", cfg);
+    AeroState st_flat   = potential::solve(flat, mp_flat, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    AeroState st_curved = potential::solve(curved, mp_curved, surr, cfg, 4.0 * DEG2RAD, 0.0);
+    CHECK(st_curved.CDp > st_flat.CDp);
+}
+
 // Lift slope sign: CL increases with alpha.
 TEST(lift_increases_with_alpha) {
     WingGeometry w = demo_wing();
@@ -762,13 +812,14 @@ TEST(dynamic_stability_metrics) {
     CHECK(std::fabs(st.phugoid_zeta - zeta_ph_ref) < 1e-10);
 }
 
-// Organic raised-tip CDi credit: a smooth dihedral curve that rises steeply near
-// the tip raises effective AR (Prandtl-Munk heuristic in aero_panel.cpp, keyed to
-// nonplanar_h), so CDi must drop vs a flat wing. No discrete winglet device or
-// crease — the tip rise is just the tail of the same continuous dihedral curve.
-// This is the definitive load-bearing proof the optimizer has a physical reason
-// to keep tips.
-TEST(winglet_reduces_CDi) {
+// Winglet CDi credit is gated to genuinely sharp corners (local dihedral >
+// WINGLET_DIH_THRESHOLD_DEG = 60, geom.cpp). A smooth curve that rises to 45
+// deg -- gentle enough to be reachable under today's 30-deg-per-CP gene cap
+// once monotonicity is applied elsewhere -- must NOT reduce CDi: that was the
+// dihedral reward-hacking bug (a gentle gull credited as if it were a sharp
+// discrete winglet). Only a curve that actually crosses the 60-deg threshold
+// gets the effective-span bonus.
+TEST(gentle_tip_rise_earns_no_CDi_credit) {
     Config cfg; cfg.set("aero_model", "panel");
     cfg.set("panel_chordwise", "6");
     viscous::Surrogate surr; surr.load("", cfg);
@@ -776,11 +827,13 @@ TEST(winglet_reduces_CDi) {
     WingGeometry w0 = demo_wing();   // flat dihedral curve (all zero) by default
 
     WingGeometry w1 = demo_wing();
-    // Smooth dihedral-angle curve: flat inboard, rising to a steep organic tip.
+    // Smooth dihedral-angle curve: flat inboard, rising to a gentle organic
+    // tip -- stays under the 60-deg sharp-corner threshold everywhere.
     w1.dih_cp = {0.0, 0.0, 5.0 * DEG2RAD, 15.0 * DEG2RAD,
                  30.0 * DEG2RAD, 40.0 * DEG2RAD, 45.0 * DEG2RAD};
     geom::loft(w1, 20);             // re-loft with the raised tip applied
     CHECK(w1.nonplanar_h > 0.0);    // curve actually left the plane
+    for (const auto& s : w1.stations) CHECK(!s.in_winglet);   // never crosses 60 deg
 
     double alpha = 4.0 * DEG2RAD;
     MassProps mp0 = massprops::compute(w0, cfg);
@@ -789,5 +842,28 @@ TEST(winglet_reduces_CDi) {
     AeroState st1 = potential::solve(w1, mp1, surr, cfg, alpha, 0.0);
 
     CHECK(st0.CDi > 0.0);
-    CHECK(st1.CDi < st0.CDi);   // raised organic tip → larger AR_eff → less induced drag
+    // No credit: CDi must match the plain formula on the wing's own (un-bumped) AR.
+    CHECK_NEAR(st1.CDi, st1.CL * st1.CL / (PI * st1.e * mp1.AR), 1e-9);
+}
+
+// A curve that actually crosses the sharp-corner threshold (>60 deg) still
+// earns the effective-span CDi credit -- the gate only excludes gentle curves.
+TEST(sharp_tip_fold_earns_CDi_credit) {
+    Config cfg; cfg.set("aero_model", "panel");
+    cfg.set("panel_chordwise", "6");
+    viscous::Surrogate surr; surr.load("", cfg);
+
+    WingGeometry w = demo_wing();
+    w.dih_cp = {0.0, 0.0, 5.0 * DEG2RAD, 20.0 * DEG2RAD,
+               45.0 * DEG2RAD, 65.0 * DEG2RAD, 75.0 * DEG2RAD};
+    geom::loft(w, 20);
+    bool any_winglet = false;
+    for (const auto& s : w.stations) if (s.in_winglet) any_winglet = true;
+    CHECK(any_winglet);   // curve does cross the 60-deg threshold near the tip
+
+    double alpha = 4.0 * DEG2RAD;
+    MassProps mp = massprops::compute(w, cfg);
+    AeroState st = potential::solve(w, mp, surr, cfg, alpha, 0.0);
+    // Credit applied: CDi must be strictly BELOW the un-bumped formula.
+    CHECK(st.CDi < st.CL * st.CL / (PI * st.e * mp.AR));
 }

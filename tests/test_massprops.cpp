@@ -102,6 +102,29 @@ TEST(prop_clearance_ok_for_short_wing) {
     CHECK(mp.prop_clearance > 0.0);
 }
 
+// Structural mass must scale with true arc length, not projected span -- a
+// dihedral wing has more skin/spar material than a flat wing of the same
+// projected span and chord (root cause of the dihedral reward-hacking fix).
+TEST(dihedral_increases_mass_via_arc_length) {
+    WingGeometry flat = rect_wing();
+
+    WingGeometry curved;
+    curved.semi_span = 0.60;
+    geom::set_linear_planform(curved, 0.20, 0.20, 0.0, 0.0);
+    curved.dih_cp.assign(geom::NCP_DIH, 20.0 * DEG2RAD);
+    curved.dih_cp[0] = 0.0;
+    Airfoil af; af.wu = {0.18, 0.15, 0.12, 0.10};
+    af.wl = {-0.18, -0.15, -0.12, -0.10};
+    af.te_thick = 0.0;
+    curved.sections.assign(1, af);
+    geom::loft(curved, 20);
+
+    Config cfg;
+    MassProps mp_flat   = massprops::compute(flat, cfg);
+    MassProps mp_curved = massprops::compute(curved, cfg);
+    CHECK(mp_curved.mass > mp_flat.mass);
+}
+
 // Spar clearance is finite and bounded by the local half-thickness.
 TEST(spar_clearance_bounded) {
     WingGeometry w = rect_wing();

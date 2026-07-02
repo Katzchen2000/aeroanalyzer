@@ -374,6 +374,11 @@ void loft(WingGeometry& w, int n) {
         double y_lo = (i == 0)     ? yp[0]     : 0.5 * (yp[i-1] + yp[i]);
         double y_hi = (i == n - 1) ? yp[n - 1] : 0.5 * (yp[i]   + yp[i+1]);
         s.width = y_hi - y_lo;
+        // Arc-length twin of width, using the pre-projection arc coord y[] --
+        // real skin/spar material follows the curve, not its cos(dihedral) shadow.
+        double s_lo = (i == 0)     ? y[0]     : 0.5 * (y[i-1] + y[i]);
+        double s_hi = (i == n - 1) ? y[n - 1] : 0.5 * (y[i]   + y[i+1]);
+        s.ds = s_hi - s_lo;
         w.stations[i] = s;
     }
 }

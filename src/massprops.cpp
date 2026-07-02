@@ -66,7 +66,7 @@ MassProps compute(const WingGeometry& w, const Config& cfg) {
         double shell = P_hat * s.chord * t_shell;                // m^2 (thin wall)
         shell = std::min(shell, enclosed);
         double solid = shell + infill * (enclosed - shell);      // equiv solid area
-        double dvol = solid * s.width;                           // m^3
+        double dvol = solid * s.ds;                              // m^3 (true arc length)
         double dm = dvol * rho_mat;                              // kg
         double x_centroid = s.x_le + 0.42 * s.chord;            // ~area centroid
         vol_half  += dvol;

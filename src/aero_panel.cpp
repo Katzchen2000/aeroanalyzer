@@ -736,12 +736,13 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
     // Total CL including the control-surface increment.
     st.CL = panel_CL + pc.CLde * delta_e;
 
-    // Non-planar CDi: Prandtl-Munk heuristic, keyed to the smooth curve's own
-    // vertical extent (organic tip -> no discrete winglet height to read).
-    // ponytail: nonplanar_h=max|z| treats a broad gentle gull and a tight raised
-    // tip of equal height the same; upgrade to Trefftz if that distinction bites.
+    // Non-planar CDi: Prandtl-Munk heuristic. Only stations already flagged
+    // in_winglet (local dihedral > WINGLET_DIH_THRESHOLD_DEG, geom.cpp) count
+    // toward h -- a gentle gull curve never crosses that threshold and gets
+    // no effective-span credit; only a genuinely sharp fold does.
     {
-        double h      = w.nonplanar_h;
+        double h = 0.0;
+        for (const auto& s : w.stations) if (s.in_winglet) h = std::max(h, std::fabs(s.z));
         double k_wl   = cfg.getd("winglet_eff_factor", 0.45);
         double b_eff  = mp.b_full + k_wl * 2.0 * h;
         double AR_eff = (mp.S_ref > 0) ? b_eff * b_eff / mp.S_ref : AR;
@@ -819,7 +820,12 @@ AeroState solve(const WingGeometry& w, const MassProps& mp,
         }
         double outer  = std::max(0.0, (t - 0.5) / 0.5);
         double factor = 1.0 + (xflow_fac - 1.0) * ramp * outer;
-        CDp_num += pol.cd * factor * chord * dy;
+        // Wetted (arc-length) strip width for viscous drag -- a curved wing's
+        // real skin area exceeds its projected dy by 1/cos(local dihedral).
+        double phi_avg = 0.5 * (w.stations[sp].dihedral + w.stations[sp + 1].dihedral);
+        double cosphi  = std::cos(phi_avg);
+        double dy_wet  = (cosphi > 1e-6) ? dy / cosphi : dy;
+        CDp_num += pol.cd * factor * chord * dy_wet;
         if (pol.clamped && cl_i > 0.0 && t > 0.6) tip_stall = true;
     }
     st.CDp = (Shalf > 0) ? CDp_num / Shalf : 0.0;

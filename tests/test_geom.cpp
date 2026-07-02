@@ -84,6 +84,31 @@ TEST(loft_spanwise) {
     CHECK(w.stations.back().x_le > w.stations.front().x_le);  // swept aft
 }
 
+// Arc-length station width (ds) must exceed projected width whenever the
+// span is curved -- ds == width only for a flat wing (mass root-cause fix).
+TEST(arc_length_exceeds_projected_when_curved) {
+    WingGeometry flat;
+    flat.semi_span = 0.6;
+    geom::set_linear_planform(flat, 0.20, 0.20, 0.0, 0.0);
+    flat.sections.resize(1);
+    geom::loft(flat, 20);
+    for (const auto& s : flat.stations) CHECK_NEAR(s.ds, s.width, 1e-9);
+
+    WingGeometry curved;
+    curved.semi_span = 0.6;
+    geom::set_linear_planform(curved, 0.20, 0.20, 0.0, 0.0);
+    curved.dih_cp.assign(geom::NCP_DIH, 20.0 * DEG2RAD);
+    curved.dih_cp[0] = 0.0;
+    curved.sections.resize(1);
+    geom::loft(curved, 20);
+    bool any_strict = false;
+    for (const auto& s : curved.stations) {
+        CHECK(s.ds >= s.width - 1e-9);
+        if (s.ds > s.width + 1e-9) any_strict = true;
+    }
+    CHECK(any_strict);
+}
+
 // New genome layout: N_GENES == 67, G_SEC addressing correct.
 TEST(genome_layout_67_genes) {
     CHECK(geom::N_GENES == 67);

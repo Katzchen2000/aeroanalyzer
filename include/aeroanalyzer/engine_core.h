@@ -43,7 +43,8 @@ struct Station {
     double x_le   = 0.0;   // leading-edge x, m (sweep offset)
     double z      = 0.0;   // dihedral offset, m
     double twist    = 0.0;   // local incidence (washout), rad
-    double width    = 0.0;   // spanwise strip width for integration, m
+    double width    = 0.0;   // projected spanwise strip width, m (S_ref/MAC/control integrals)
+    double ds       = 0.0;   // true arc-length strip width, m (mass/material — NOT cosine-projected)
     double dihedral = 0.0;   // local section normal tilt, rad (0=flat, π/2=vertical)
     double eta      = 0.0;   // normalised span parameter t=y_flat/semi_span
     bool in_winglet = false;  // true where local dihedral angle exceeds the
